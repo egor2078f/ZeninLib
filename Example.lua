@@ -1,5 +1,5 @@
 -- ZeninUI example: demonstrates every element and the main window features.
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/AWLOID/lib/main/library.lua"))()
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/egor2078f/ZeninLib/refs/heads/main/ZeninLib.lua"))()
 
 local Window = Library:CreateWindow({
 	Title = "Zenin Demo",
