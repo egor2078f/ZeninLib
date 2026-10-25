@@ -298,10 +298,30 @@ local function IsClickOrTouch(i)
 	return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
 end
 
+local ActiveTweens = setmetatable({}, {__mode = "k"})
 local function Tween(obj, info, props)
 	local t = TweenService:Create(obj, info, props)
+	local list = ActiveTweens[obj]
+	if not list then
+		list = {}
+		ActiveTweens[obj] = list
+	end
+	list[t] = true
+	t.Completed:Connect(function() list[t] = nil end)
 	t:Play()
 	return t
+end
+
+-- Cancels running tweens so an instant theme/accent repaint isn't overwritten by a stale tween target.
+local function StopTweens(...)
+	for i = 1, select("#", ...) do
+		local obj = select(i, ...)
+		local list = obj and ActiveTweens[obj]
+		if list then
+			ActiveTweens[obj] = nil
+			for t in pairs(list) do pcall(function() t:Cancel() end) end
+		end
+	end
 end
 
 local function TextWidth(text, size)
@@ -325,16 +345,38 @@ local function FormatNumber(v, decimals)
 	return tostring(math.floor(v + 0.5))
 end
 
+local function Byte(x)
+	return math.clamp(math.floor((tonumber(x) or 0) * 255 + 0.5), 0, 255)
+end
+
 local function ToHex(c)
-	return string.format("%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+	if typeof(c) ~= "Color3" then return "FFFFFF" end
+	return string.format("%02X%02X%02X", Byte(c.R), Byte(c.G), Byte(c.B))
 end
 
 local function FromHex(hex)
-	hex = tostring(hex):gsub("#", "")
+	if type(hex) ~= "string" then return nil end
+	hex = hex:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^#", "")
+	if #hex == 3 then hex = hex:gsub(".", "%0%0") end
 	if #hex ~= 6 then return nil end
 	local r, g, b = tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16), tonumber(hex:sub(5, 6), 16)
 	if not (r and g and b) then return nil end
 	return Color3.fromRGB(r, g, b)
+end
+
+-- Normalizes Color3 / "#hex" input to an in-range Color3, or nil.
+local function ToColor(c)
+	if typeof(c) == "Color3" then
+		return Color3.new(math.clamp(c.R, 0, 1), math.clamp(c.G, 0, 1), math.clamp(c.B, 0, 1))
+	end
+	if type(c) == "string" then return FromHex(c) end
+	return nil
+end
+
+local function ToAlpha(a)
+	a = tonumber(a)
+	if not a or a ~= a then return nil end
+	return math.clamp(a, 0, 1)
 end
 
 
@@ -555,8 +597,11 @@ local function Finish(el, o)
 	if el.Flag then Library.Flags[el.Flag] = el.Get() end
 	if o.DependsOn then el.DependsOn(o.DependsOn, o.InvertDependency) end
 	el._apply(false)
+	do
+		local ok, d = pcall(SerializeFlag, el)
+		if ok then el._default = d end
+	end
 	if el.Flag then
-		el._default = SerializeFlag(el)
 		local pending = el._win.PendingFlags
 		if pending and pending[el.Flag] ~= nil then
 			local v = pending[el.Flag]
@@ -727,7 +772,7 @@ local function OpenList(W, owner, btn, options, isSelected, onPick, multi)
 		Active = true,
 	})
 	Corner(popup, 5)
-	Stroke(popup, T.DropdownBorder, 1)
+	local popupStroke = Stroke(popup, T.DropdownBorder, 1)
 	local scrolls = #options > maxVisible
 	local list = Create("ScrollingFrame", {
 		Size = UDim2.new(1, 0, 0, listH),
@@ -746,12 +791,13 @@ local function OpenList(W, owner, btn, options, isSelected, onPick, multi)
 	local items = {}
 	local function Paint(it)
 		local sel = isSelected(it.opt)
-		it.btn.TextColor3 = sel and W.Accent or T.Text
+		it.btn.TextColor3 = sel and W.Accent or W.Theme.Text
 		ApplyFont(it.btn, sel and "SemiBold" or "Medium")
 	end
 
+	local empty
 	if #options == 0 then
-		Label(list, "No options", {Position = UDim2.fromOffset(7, 0), Size = UDim2.new(1, -7, 0, itemH), Color = T.TextDim})
+		empty = Label(list, "No options", {Position = UDim2.fromOffset(7, 0), Size = UDim2.new(1, -7, 0, itemH), Color = T.TextDim})
 	end
 	for i, opt in ipairs(options) do
 		local ob = Create("TextButton", {
@@ -781,6 +827,13 @@ local function OpenList(W, owner, btn, options, isSelected, onPick, multi)
 		end)
 	end
 
+	W.Bind(function(th)
+		popup.BackgroundColor3 = th.PopupBg
+		popupStroke.Color = th.DropdownBorder
+		list.ScrollBarImageColor3 = th.DropdownBorder
+		if empty then empty.TextColor3 = th.TextDim end
+		for _, x in ipairs(items) do Paint(x) end
+	end, popup)
 	W.PushPopup(popup, owner)
 	Tween(popup, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.fromOffset(w, totalH)})
 end
@@ -820,15 +873,13 @@ local function AddToggle(W, S, o)
 		end
 		local lc = (not enabled) and T.TextDim or ((state or el._hover) and T.Text or T.TextGray)
 		if animate then
-			Tween(lbl, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {TextColor3 = lc})
-		else
-			lbl.TextColor3 = lc
-		end
-		if animate then
 			local ti = TweenInfo.new(0.14, Enum.EasingStyle.Quad)
+			Tween(lbl, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {TextColor3 = lc})
 			Tween(dot, ti, {Position = dotPos, BackgroundColor3 = dotC})
 			Tween(sw, ti, {BackgroundColor3 = bg, BackgroundTransparency = bgT})
 		else
+			StopTweens(lbl, dot, sw)
+			lbl.TextColor3 = lc
 			dot.Position, dot.BackgroundColor3 = dotPos, dotC
 			sw.BackgroundColor3, sw.BackgroundTransparency = bg, bgT
 		end
@@ -962,7 +1013,7 @@ local function AddSlider(W, S, o)
 	Method(el, "Get", function() return value end)
 	Method(el, "SetName", function(t) lbl.Text = tostring(t) end)
 	Method(el, "SetRange", function(mn, mx)
-		minV, maxV = mn or minV, mx or maxV
+		minV, maxV = tonumber(mn) or minV, tonumber(mx) or maxV
 		if maxV <= minV then maxV = minV + 1 end
 		SetValue(value)
 	end)
@@ -1254,8 +1305,9 @@ local function AddCardButton(W, S, o)
 		local a = W.AccentAlpha * (enabled and 1 or 0.45)
 		box.BackgroundColor3 = T.DropdownBg
 		boxStroke.Color = enabled and T.DropdownBorder or T.DropdownBorderOff
-		tile.BackgroundColor3 = T.CardBg:Lerp(o.IconColor or W.Accent, 0.22 * a)
-		icon.ImageColor3 = o.IconColor or W.Accent
+		local ic = ToColor(o.IconColor) or W.Accent
+		tile.BackgroundColor3 = T.CardBg:Lerp(ic, 0.22 * a)
+		icon.ImageColor3 = ic
 		icon.ImageTransparency = 1 - a
 		titleLbl.TextColor3 = enabled and T.TextGray or T.TextDim
 		descLbl.TextColor3 = T.TextDim
@@ -1314,10 +1366,15 @@ local function AddCardButton(W, S, o)
 	return el
 end
 
-local function OpenColorModal(W, owner, anchor, color, alpha, onChange)
+local function OpenColorModal(W, owner, anchor, color, alpha, onChange, state)
 	local T = W.Theme
+	color = ToColor(color) or WHITE
 	local h, s, v = color:ToHSV()
-	local a = 1 - (alpha or 1)
+	-- Gray/black colors carry no hue; reuse the last picked hue so it isn't reset to red.
+	if state and state.h and (s == 0 or v == 0) then h = state.h end
+	if state and state.s and v == 0 then s = state.s end
+	h = math.clamp(h, 0, 0.999)
+	local a = 1 - (ToAlpha(alpha) or 1)
 
 	local MW, MH = 208, 184
 	local SV, BW, BH = 144, 16, 144
@@ -1335,7 +1392,7 @@ local function OpenColorModal(W, owner, anchor, color, alpha, onChange)
 		Active = true,
 	})
 	Corner(modal, 4)
-	Stroke(modal, T.BoxBorder, 1)
+	local modalStroke = Stroke(modal, T.BoxBorder, 1)
 
 	local svBox = Create("Frame", {
 		Size = UDim2.fromOffset(SV, SV),
@@ -1439,19 +1496,41 @@ local function OpenColorModal(W, owner, anchor, color, alpha, onChange)
 		alphaLbl.Text = math.floor(alpha * 100 + 0.5) .. "%"
 	end
 	Refresh()
+	W.Bind(function(th)
+		modal.BackgroundColor3 = th.PopupBg
+		modalStroke.Color = th.BoxBorder
+		hexLbl.TextColor3 = th.TextGray
+		alphaLbl.TextColor3 = th.TextGray
+	end, modal)
 
-	local mode = nil
+	local mode, last = nil, nil
+	local function Ratio(pos, frame, axis)
+		local size = frame.AbsoluteSize[axis]
+		if size <= 0 then return nil end
+		return math.clamp((pos[axis] - frame.AbsolutePosition[axis]) / size, 0, 1)
+	end
 	local function Process(inp)
+		if not modal.Parent then return end
+		local pos = inp.Position
 		if mode == "SV" then
-			s = math.clamp((inp.Position.X - svBox.AbsolutePosition.X) / svBox.AbsoluteSize.X, 0, 1)
-			v = 1 - math.clamp((inp.Position.Y - svBox.AbsolutePosition.Y) / svBox.AbsoluteSize.Y, 0, 1)
+			local x, y = Ratio(pos, svBox, "X"), Ratio(pos, svBox, "Y")
+			if not (x and y) then return end
+			s, v = x, 1 - y
 		elseif mode == "H" then
-			h = math.clamp((inp.Position.Y - hueBar.AbsolutePosition.Y) / hueBar.AbsoluteSize.Y, 0, 0.999)
+			local y = Ratio(pos, hueBar, "Y")
+			if not y then return end
+			h = math.min(y, 0.999)
 		elseif mode == "A" then
-			a = math.clamp((inp.Position.Y - alphaBar.AbsolutePosition.Y) / alphaBar.AbsoluteSize.Y, 0, 0.92)
+			local y = Ratio(pos, alphaBar, "Y")
+			if not y then return end
+			a = y
 		else
 			return
 		end
+		if state then state.h, state.s = h, s end
+		local key = h .. "," .. s .. "," .. v .. "," .. a
+		if key == last then return end
+		last = key
 		Refresh()
 		onChange(Color3.fromHSV(h, s, v), 1 - a)
 	end
@@ -1471,6 +1550,7 @@ end
 
 local function AccentPicker(W, S, labelText)
 	local el, row = NewElement(W, S, "AccentPicker", {}, 25)
+	local hueState = {}
 	local icon = CreateIcon(row, {"palette"}, 12, UDim2.new(0, -1.5, 0.5, -6))
 	local lbl = Label(row, labelText, {Position = UDim2.fromOffset(14, 0), Size = UDim2.new(0.7, -14, 1, 0)})
 	local circle = Create("TextButton", {
@@ -1482,16 +1562,22 @@ local function AccentPicker(W, S, labelText)
 		Parent = row,
 	})
 	Corner(circle, 9)
-	W.Bind(function(T, accent)
-		icon.ImageColor3 = T.TextGray
-		lbl.TextColor3 = T.TextGray
-		circle.BackgroundColor3 = accent
-	end, row)
+	local circleStroke = Stroke(circle, WHITE, 1)
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		icon.ImageColor3 = enabled and T.TextGray or T.TextDim
+		lbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		circle.BackgroundColor3 = W.Accent
+		circle.BackgroundTransparency = 1 - W.AccentAlpha * (enabled and 1 or 0.45)
+		circleStroke.Color = T.BoxBorder
+	end
+	W.Bind(function() el._apply() end, row)
+	W.AccentPickerEl = el
 	Method(el, "Get", function() return W.Accent, W.AccentAlpha end)
-	Method(el, "Set", function(c, a) W.SetAccent(c, a) end)
+	Method(el, "Set", function(c, a) W.SetAccentExternal(c, a) end)
 	circle.MouseButton1Click:Connect(function()
-		if not W.PreparePopup(el, circle) then return end
-		OpenColorModal(W, el, circle, W.Accent, W.AccentAlpha, function(c, a) W.SetAccent(c, a) end)
+		if not el.Enabled or not W.PreparePopup(el, circle) then return end
+		OpenColorModal(W, el, circle, W.Accent, W.AccentAlpha, function(c, a) W.SetAccent(c, a) end, hueState)
 	end)
 	return el
 end
@@ -1501,14 +1587,14 @@ local function AddColorPicker(W, S, o)
 	o = Opts(o)
 	local el, row = NewElement(W, S, "ColorPicker", o, 21)
 	local def = o.Default or o.Value or o.Color or o.Colors or WHITE
-	local multi = typeof(def) ~= "Color3" and type(def) == "table"
+	local multi = type(def) == "table"
 	local list = multi and def or {def}
 	local colors, alphas = {}, {}
 	for i = 1, math.min(#list, MAX_COLORS) do
-		colors[i] = typeof(list[i]) == "Color3" and list[i] or WHITE
+		colors[i] = ToColor(list[i]) or WHITE
 		local al = o.Alpha
 		if type(al) == "table" then al = al[i] end
-		alphas[i] = math.clamp(tonumber(al) or 1, 0, 1)
+		alphas[i] = ToAlpha(al) or 1
 	end
 	if #colors == 0 then colors[1], alphas[1] = WHITE, 1 end
 	local n = #colors
@@ -1528,7 +1614,7 @@ local function AddColorPicker(W, S, o)
 			Parent = row,
 		})
 		Corner(c, CS / 2)
-		circles[i] = {btn = c, el = el, index = i}
+		circles[i] = {btn = c, el = el, index = i, stroke = Stroke(c, WHITE, 1)}
 	end
 
 	local function Value()
@@ -1547,6 +1633,7 @@ local function AddColorPicker(W, S, o)
 		for i, c in ipairs(circles) do
 			c.btn.BackgroundColor3 = colors[i]
 			c.btn.BackgroundTransparency = 1 - alphas[i] * (enabled and 1 or 0.45)
+			c.stroke.Color = T.BoxBorder
 		end
 	end
 	W.Bind(function() el._apply() end, row)
@@ -1565,27 +1652,32 @@ local function AddColorPicker(W, S, o)
 		c.btn.MouseButton1Click:Connect(function()
 			if not el.Enabled or not W.PreparePopup(c, c.btn) then return end
 			OpenColorModal(W, c, c.btn, colors[i], alphas[i], function(col, a)
+				if not el.Enabled then return end
 				colors[i], alphas[i] = col, a
 				Changed(false)
-			end)
+			end, c)
 		end)
 	end
 
 	Method(el, "Set", function(v, a, silent)
-		if typeof(v) == "Color3" then v = {v} end
-		if type(v) ~= "table" then return end
+		if type(v) ~= "table" then v = {v} end
 		for i = 1, n do
-			if typeof(v[i]) == "Color3" then colors[i] = v[i] end
-			local ai = type(a) == "table" and a[i] or a
-			if tonumber(ai) then alphas[i] = math.clamp(tonumber(ai), 0, 1) end
+			local col = ToColor(v[i])
+			if col then colors[i] = col end
+			local ai
+			if type(a) == "table" then ai = a[i] else ai = a end
+			if ToAlpha(ai) then alphas[i] = ToAlpha(ai) end
 		end
 		W.ClosePopupOf(el)
 		Changed(silent)
 	end)
 	Method(el, "SetColor", function(i, col, a, silent)
+		i = tonumber(i) or 1
 		if not colors[i] then return end
-		if typeof(col) == "Color3" then colors[i] = col end
-		if tonumber(a) then alphas[i] = math.clamp(tonumber(a), 0, 1) end
+		col = ToColor(col)
+		if col then colors[i] = col end
+		if ToAlpha(a) then alphas[i] = ToAlpha(a) end
+		W.ClosePopupOf(circles[i])
 		Changed(silent)
 	end)
 	Method(el, "Get", Value)
@@ -1608,7 +1700,9 @@ local function AddColorPicker(W, S, o)
 			local d = data[i]
 			if type(d) == "table" then
 				cs[i] = FromHex(d[1]) or colors[i]
-				as[i] = tonumber(d[2]) or alphas[i]
+				as[i] = ToAlpha(d[2]) or alphas[i]
+			elseif type(d) == "string" then
+				cs[i] = FromHex(d) or colors[i]
 			end
 		end
 		el.Set(cs, as)
@@ -1678,7 +1772,1100 @@ local function AddPlainButton(W, S, o)
 	return el
 end
 
-local ELEMENT_KINDS = {"Toggle", "Slider", "Dropdown", "MultiDropdown", "Button", "CardButton", "ColorPicker"}
+local function AddInput(W, S, o)
+	o = Opts(o)
+	local el, row = NewElement(W, S, "Input", o, 25)
+	local numeric = o.Numeric == true
+	local maxLen = tonumber(o.MaxLength)
+	local live = o.Finished == false
+	local value = ""
+
+	local lbl = Label(row, o.Name or o.Title or "Input", {Size = UDim2.new(0.5, -4, 1, 0), Truncate = true})
+	local box = Create("TextBox", {
+		Size = UDim2.new(0.5, 0, 0, 25),
+		Position = UDim2.new(0.5, 0, 0, 0),
+		BorderSizePixel = 0,
+		Text = "",
+		PlaceholderText = tostring(o.Placeholder or ""),
+		ClearTextOnFocus = o.ClearTextOnFocus == true,
+		ClipsDescendants = true,
+		TextSize = TEXT,
+		Weight = "Medium",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 2,
+		Parent = row,
+	})
+	Corner(box, 5)
+	local bs = Stroke(box, WHITE, 1)
+	Create("UIPadding", {PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7), Parent = box})
+
+	local function Sanitize(text)
+		text = tostring(text or "")
+		if maxLen and #text > maxLen then text = text:sub(1, maxLen) end
+		if numeric then
+			local n = tonumber(text)
+			if not n then return text == "" and "" or value end
+			if o.Min then n = math.max(n, o.Min) end
+			if o.Max then n = math.min(n, o.Max) end
+			return FormatNumber(n, o.Decimals or Decimals(n))
+		end
+		return text
+	end
+	local function Out()
+		if numeric then return tonumber(value) end
+		return value
+	end
+
+	local updating = false
+	local function Commit(text, silent)
+		text = Sanitize(text)
+		updating = true
+		box.Text = text
+		updating = false
+		local changed = text ~= value
+		value = text
+		el.Value = Out()
+		if changed and not silent then
+			el._fire(el.Value)
+		else
+			el._sync(el.Value)
+		end
+	end
+
+	local focused = false
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		lbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		box.BackgroundColor3 = T.DropdownBg
+		box.TextColor3 = enabled and T.Text or T.ValueOff
+		box.PlaceholderColor3 = T.TextDim
+		box.TextEditable = enabled
+		bs.Color = (focused and enabled) and W.Accent or (enabled and T.DropdownBorder or T.DropdownBorderOff)
+		bs.Transparency = (focused and enabled) and (1 - W.AccentAlpha) or 0
+		if not enabled and box:IsFocused() then box:ReleaseFocus() end
+	end
+	W.Bind(function() el._apply() end, row)
+
+	box.Focused:Connect(function()
+		focused = true
+		el._apply()
+	end)
+	box.FocusLost:Connect(function()
+		focused = false
+		el._apply()
+		Commit(box.Text)
+	end)
+	box:GetPropertyChangedSignal("Text"):Connect(function()
+		if updating then return end
+		if maxLen and #box.Text > maxLen then
+			updating = true
+			box.Text = box.Text:sub(1, maxLen)
+			updating = false
+		end
+		if live and el.Enabled then Commit(box.Text) end
+	end)
+
+	Method(el, "Set", function(v, silent) Commit(v, silent) end)
+	Method(el, "Get", Out)
+	Method(el, "SetName", function(t) lbl.Text = tostring(t) end)
+	Method(el, "SetPlaceholder", function(t) box.PlaceholderText = tostring(t or "") end)
+	Method(el, "Focus", function() if el.Enabled then box:CaptureFocus() end end)
+	Method(el, "Clear", function(silent) Commit("", silent) end)
+
+	Commit(o.Default or o.Value or "", true)
+	return Finish(el, o)
+end
+
+local KEY_SHORT = {
+	LeftShift = "LShift", RightShift = "RShift", LeftControl = "LCtrl", RightControl = "RCtrl",
+	LeftAlt = "LAlt", RightAlt = "RAlt", MouseButton1 = "MB1", MouseButton2 = "MB2", MouseButton3 = "MB3",
+	Return = "Enter", CapsLock = "Caps", PageUp = "PgUp", PageDown = "PgDn",
+}
+local function ParseKey(k)
+	if typeof(k) == "EnumItem" then
+		if k.EnumType == Enum.KeyCode and k ~= Enum.KeyCode.Unknown then return k end
+		if k == Enum.UserInputType.MouseButton1 or k == Enum.UserInputType.MouseButton2 or k == Enum.UserInputType.MouseButton3 then return k end
+		return nil
+	end
+	if type(k) == "string" and k ~= "" and k ~= "None" then
+		local ok, v = pcall(function() return Enum.KeyCode[k] end)
+		if ok and v then return ParseKey(v) end
+		ok, v = pcall(function() return Enum.UserInputType[k] end)
+		if ok and v then return ParseKey(v) end
+	end
+	return nil
+end
+local function KeyMatches(key, input)
+	if not key then return false end
+	if key.EnumType == Enum.KeyCode then return input.KeyCode == key end
+	return input.UserInputType == key
+end
+
+local function TouchOnly()
+	return UserInputService.TouchEnabled == true and UserInputService.KeyboardEnabled ~= true
+end
+
+-- Press/release on a GUI object that works for mouse and touch; release is tracked globally
+-- so a finger sliding off the object still ends a hold.
+local function BindPress(W, obj, onDown, onUp)
+	local held
+	obj.InputBegan:Connect(function(input)
+		if held or not IsClickOrTouch(input) then return end
+		held = input
+		SafeCall(onDown)
+	end)
+	return W.Connect(UserInputService.InputEnded, function(input)
+		if not held then return end
+		local same
+		if held.UserInputType == Enum.UserInputType.Touch then
+			same = input == held
+		else
+			same = input.UserInputType == held.UserInputType
+		end
+		if same then
+			held = nil
+			SafeCall(onUp)
+		end
+	end)
+end
+
+local function BuildKeybindList(W, cfg)
+	if cfg == false then cfg = {Visible = false} end
+	if type(cfg) ~= "table" then cfg = {} end
+	local touch = cfg.TouchMode
+	if touch == nil then touch = TouchOnly() end
+	local ROW_H = touch and 30 or 22
+	local LIST_W = touch and 210 or 186
+
+	local L = {Entries = {}, Wanted = cfg.Visible ~= false and cfg.Enabled ~= false, ShowInactive = cfg.ShowInactive ~= false, Collapsed = false}
+	W.KBList = L
+
+	local frame = Create("Frame", {
+		Name = "KeybindList",
+		Size = UDim2.fromOffset(LIST_W, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Position = cfg.Position or UDim2.fromOffset(8, 42),
+		BackgroundTransparency = 0.1,
+		BorderSizePixel = 0,
+		Active = true,
+		Visible = false,
+		Parent = W.Gui,
+	})
+	W.Paint(frame, "BackgroundColor3", "WmBg")
+	Corner(frame, 6)
+	local stroke = Stroke(frame, WHITE, 1, 0.15)
+	W.Paint(stroke, "Color", "WmStroke")
+	Create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Parent = frame})
+	Create("UIPadding", {PaddingBottom = UDim.new(0, 4), Parent = frame})
+
+	local header = Create("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Active = true, LayoutOrder = 0, Parent = frame})
+	local hIcon = CreateIcon(header, {"keyboard", "command"}, 12, UDim2.new(0, 10, 0.5, -6))
+	local title = Label(header, cfg.Title or "Keybinds", {Position = UDim2.fromOffset(28, 0), Size = UDim2.new(1, -80, 1, 0), Weight = "SemiBold", Truncate = true})
+	local count = Label(header, "", {Position = UDim2.new(1, -60, 0, 0), Size = UDim2.fromOffset(30, 26), TextSize = 10, Align = Enum.TextXAlignment.Right})
+	local collapse = Create("TextButton", {
+		Size = UDim2.fromOffset(24, 24),
+		Position = UDim2.new(1, -27, 0.5, -12),
+		BackgroundTransparency = 1,
+		Text = "",
+		AutoButtonColor = false,
+		Parent = header,
+	})
+	local chev = CreateIcon(collapse, {"chevron-up"}, 12, UDim2.new(0.5, -6, 0.5, -6))
+	local line = Create("Frame", {Size = UDim2.new(1, -16, 0, 1), Position = UDim2.new(0, 8, 1, -1), BorderSizePixel = 0, Parent = header})
+	MakeDraggable(W, header, frame)
+
+	local body = Create("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 1, Parent = frame})
+	Create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Parent = body})
+	Create("UIPadding", {PaddingTop = UDim.new(0, 3), Parent = body})
+	local empty = Label(body, touch and "No keybinds" or "No active keybinds", {Size = UDim2.new(1, 0, 0, ROW_H), TextSize = 10, Align = Enum.TextXAlignment.Center})
+	empty.LayoutOrder = 1e6
+
+	local function PaintEntry(e)
+		local T = W.Theme
+		local on = (e.isActive() or e.pulse == true) and true or false
+		e.bar.Visible = on
+		e.bar.BackgroundColor3 = W.Accent
+		e.bar.BackgroundTransparency = 1 - W.AccentAlpha
+		e.name.TextColor3 = not e.enabled() and T.TextDim or (on and T.Text or T.TextGray)
+		e.mode.TextColor3 = T.TextDim
+		e.pill.BackgroundColor3 = T.DropdownBg
+		e.pillStroke.Color = on and W.Accent or T.DropdownBorder
+		e.pillStroke.Transparency = on and (1 - W.AccentAlpha) or 0
+		e.key.TextColor3 = on and W.Accent or T.TextGray
+		e.row.BackgroundColor3 = T.PopupHover
+	end
+
+	function L.Refresh()
+		if not W.Alive then return end
+		local shown = 0
+		for i, e in ipairs(L.Entries) do
+			local visible = e.listed() and (L.ShowInactive or e.isActive() or e.pulse == true) and true or false
+			e.row.Visible = visible and not L.Collapsed
+			e.row.LayoutOrder = i
+			if visible then
+				shown = shown + 1
+				e.name.Text = e.getName()
+				e.mode.Text = e.getMode()
+				e.key.Text = e.getKey()
+				PaintEntry(e)
+			end
+		end
+		empty.Visible = shown == 0 and not L.Collapsed
+		count.Text = shown > 0 and tostring(shown) or ""
+		chev.Rotation = L.Collapsed and 180 or 0
+		local any = false
+		for _, e in ipairs(L.Entries) do if e.listed() then any = true break end end
+		frame.Visible = L.Wanted and any and not W.KeyLocked
+	end
+
+	W.Bind(function(T, accent)
+		hIcon.ImageColor3 = accent
+		title.TextColor3 = T.Text
+		count.TextColor3 = T.TextDim
+		chev.ImageColor3 = T.NavGray
+		line.BackgroundColor3 = T.WmDivider
+		empty.TextColor3 = T.TextDim
+		for _, e in ipairs(L.Entries) do PaintEntry(e) end
+	end, frame)
+
+	collapse.MouseButton1Click:Connect(function()
+		L.Collapsed = not L.Collapsed
+		L.Refresh()
+	end)
+
+	-- e: getName, getKey, getMode, isActive, enabled, listed, trigger(down)
+	function L.Add(e)
+		local row = Create("TextButton", {
+			Size = UDim2.new(1, 0, 0, ROW_H),
+			BackgroundTransparency = 1,
+			Text = "",
+			AutoButtonColor = false,
+			Parent = body,
+		})
+		e.row = row
+		e.bar = Create("Frame", {Size = UDim2.new(0, 2, 0, ROW_H - 10), Position = UDim2.fromOffset(5, 5), BorderSizePixel = 0, Parent = row})
+		Corner(e.bar, 1)
+		e.name = Label(row, "", {Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -96, 1, 0), Truncate = true})
+		local right = Create("Frame", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -8, 0.5, 0),
+			Size = UDim2.new(0, 0, 0, 18),
+			AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundTransparency = 1,
+			Parent = row,
+		})
+		Create("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Right,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0, 5),
+			Parent = right,
+		})
+		e.mode = Label(right, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10})
+		e.mode.LayoutOrder = 1
+		e.pill = Create("Frame", {Size = UDim2.new(0, 0, 0, 16), AutomaticSize = Enum.AutomaticSize.X, BorderSizePixel = 0, LayoutOrder = 2, Parent = right})
+		Corner(e.pill, 3)
+		e.pillStroke = Stroke(e.pill, WHITE, 1)
+		Create("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), Parent = e.pill})
+		e.key = Label(e.pill, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10})
+		e.conn = BindPress(W, row, function() e.trigger(true) end, function() e.trigger(false) end)
+		row.MouseEnter:Connect(function() row.BackgroundTransparency = 0.4 end)
+		row.MouseLeave:Connect(function() row.BackgroundTransparency = 1 end)
+		table.insert(L.Entries, e)
+		L.Refresh()
+		return e
+	end
+	function L.Remove(e)
+		local i = IndexOf(L.Entries, e)
+		if i then table.remove(L.Entries, i) end
+		if e.conn then pcall(function() e.conn:Disconnect() end) end
+		if e.row then e.row:Destroy() end
+		L.Refresh()
+	end
+	function L.Pulse(e)
+		e.pulse = true
+		L.Refresh()
+		task.delay(0.25, function()
+			e.pulse = nil
+			if W.Alive then L.Refresh() end
+		end)
+	end
+
+	local api = {}
+	Method(api, "SetVisible", function(b) L.Wanted = b ~= false L.Refresh() end)
+	Method(api, "IsVisible", function() return L.Wanted end)
+	Method(api, "Toggle", function() api.SetVisible(not L.Wanted) end)
+	Method(api, "SetShowInactive", function(b) L.ShowInactive = b ~= false L.Refresh() end)
+	Method(api, "SetCollapsed", function(b) L.Collapsed = b == true L.Refresh() end)
+	Method(api, "SetTitle", function(t) title.Text = tostring(t) end)
+	Method(api, "SetPosition", function(p) frame.Position = p end)
+	Method(api, "Refresh", function() L.Refresh() end)
+	L.Frame = frame
+	return api
+end
+
+local function AddKeybind(W, S, o)
+	o = Opts(o)
+	local el, row = NewElement(W, S, "Keybind", o, 25)
+	local key = ParseKey(o.Default or o.Value or o.Key)
+	local mode = tostring(o.Mode or "Toggle")
+	if mode ~= "Hold" and mode ~= "Press" then mode = "Toggle" end
+	local active = o.DefaultState == true
+	local picking = false
+	el.Value = key
+
+	local lbl = Label(row, o.Name or o.Title or "Keybind", {Size = UDim2.new(1, -90, 1, 0), Truncate = true})
+	local btn = Create("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromOffset(44, 21),
+		BorderSizePixel = 0,
+		Text = "",
+		TextSize = TEXT,
+		Weight = "Medium",
+		AutoButtonColor = false,
+		ZIndex = 2,
+		Parent = row,
+	})
+	Corner(btn, 3)
+	local bs = Stroke(btn, WHITE, 1)
+	local hover = false
+
+	local function Layout()
+		local text = picking and "..." or (key and (KEY_SHORT[key.Name] or key.Name) or "None")
+		btn.Text = text
+		btn.Size = UDim2.fromOffset(math.clamp(math.floor(TextWidth(text, TEXT) + 18), 36, 90), 21)
+	end
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		lbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		btn.BackgroundColor3 = (hover and enabled) and T.TileHover or T.DropdownBg
+		btn.TextColor3 = not enabled and T.TextDim or ((picking or active) and W.Accent or (hover and T.Text or T.TextGray))
+		bs.Color = picking and W.Accent or (enabled and T.DropdownBorder or T.DropdownBorderOff)
+		bs.Transparency = picking and (1 - W.AccentAlpha) or 0
+	end
+	W.Bind(function() el._apply() end, row)
+	Layout()
+
+	local function StopPicking()
+		if not picking then return end
+		picking = false
+		W.Capturing = nil
+		Layout()
+		el._apply()
+	end
+	local entry
+	local function ListRefresh() if entry and W.KBList then W.KBList.Refresh() end end
+	local function SetKey(k, silent)
+		k = ParseKey(k)
+		local changed = k ~= key
+		key = k
+		el.Value = k
+		StopPicking()
+		Layout()
+		el._apply()
+		el._sync(k)
+		ListRefresh()
+		if changed and not silent then SafeCall(o.ChangedCallback, k) end
+	end
+	local function SetActive(b)
+		b = b and true or false
+		if b == active then return end
+		active = b
+		el._apply()
+		ListRefresh()
+		SafeCall(o.Callback, active)
+		SafeCall(o.ToggleCallback, active)
+	end
+	-- Same behaviour as pressing the bound key; used by touch taps and the keybind list.
+	local function Trigger(down)
+		if W.KeyLocked or not el.Enabled or not row.Parent then
+			if not down and mode == "Hold" then SetActive(false) end
+			return
+		end
+		if mode == "Toggle" then
+			if down then SetActive(not active) end
+		elseif mode == "Hold" then
+			SetActive(down)
+		elseif down then
+			if entry and W.KBList then W.KBList.Pulse(entry) end
+			SafeCall(o.Callback, true)
+		end
+	end
+	el._trigger = Trigger
+
+	btn.MouseEnter:Connect(function() hover = true el._apply() end)
+	btn.MouseLeave:Connect(function() hover = false el._apply() end)
+	local touchConn
+	-- Phones have no keys to bind, so tapping the key button runs the bind instead.
+	local touchTrigger = o.TouchTrigger
+	if touchTrigger == nil then touchTrigger = TouchOnly() end
+	if touchTrigger then
+		touchConn = BindPress(W, btn, function() Trigger(true) end, function() Trigger(false) end)
+	else
+		btn.MouseButton1Click:Connect(function()
+			if not el.Enabled or picking then return end
+			if W.Capturing then return end
+			picking = true
+			W.Capturing = el
+			Layout()
+			el._apply()
+		end)
+	end
+
+	local conns = {}
+	table.insert(conns, W.Connect(UserInputService.InputBegan, function(input, gp)
+		if not row.Parent then return end
+		if picking then
+			local t = input.UserInputType
+			if t == Enum.UserInputType.Keyboard then
+				W.LastCaptured = input
+				if input.KeyCode == Enum.KeyCode.Escape then
+					StopPicking()
+				elseif input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Delete then
+					SetKey(nil)
+				else
+					SetKey(input.KeyCode)
+				end
+			elseif t == Enum.UserInputType.MouseButton2 or t == Enum.UserInputType.MouseButton3 then
+				W.LastCaptured = input
+				SetKey(t)
+			elseif t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+				StopPicking()
+			end
+			return
+		end
+		if W.KeyLocked or gp or not el.Enabled or not KeyMatches(key, input) then return end
+		if W.Capturing or W.LastCaptured == input then return end
+		Trigger(true)
+	end))
+	table.insert(conns, W.Connect(UserInputService.InputEnded, function(input)
+		if not row.Parent or mode ~= "Hold" or not active then return end
+		if W.KeyLocked then SetActive(false) return end
+		if KeyMatches(key, input) then SetActive(false) end
+	end))
+
+	Method(el, "Set", function(k, silent) SetKey(k, silent) end)
+	Method(el, "Get", function() return key end)
+	Method(el, "GetState", function() return active end)
+	Method(el, "SetState", function(b) SetActive(b) end)
+	Method(el, "IsPicking", function() return picking end)
+	Method(el, "SetMode", function(m)
+		if m == "Hold" or m == "Press" or m == "Toggle" then
+			if mode == "Hold" and m ~= "Hold" then SetActive(false) end
+			mode = m
+			ListRefresh()
+		end
+	end)
+	Method(el, "GetMode", function() return mode end)
+	Method(el, "Trigger", function(down) Trigger(down ~= false) end)
+	Method(el, "SetName", function(t) lbl.Text = tostring(t) ListRefresh() end)
+	Method(el, "SetShowInList", function(b) o.ShowInList = b ~= false ListRefresh() end)
+	Method(el, "SetChangedCallback", function(fn) o.ChangedCallback = fn end)
+	function el._serialize() return key and key.Name or "None" end
+	function el._deserialize(v) SetKey(v, true) end
+
+	if W.KBList then
+		local MODE_TEXT = {Toggle = "toggle", Hold = "hold", Press = "press"}
+		entry = W.KBList.Add({
+			getName = function() return tostring(o.ListName or lbl.Text) end,
+			getKey = function() return key and (KEY_SHORT[key.Name] or key.Name) or (touchTrigger and "Tap" or "None") end,
+			getMode = function() return MODE_TEXT[mode] or "" end,
+			isActive = function() return active end,
+			enabled = function() return el.Enabled end,
+			listed = function() return o.ShowInList ~= false and el.Visible and row.Parent ~= nil end,
+			trigger = Trigger,
+		})
+	end
+
+	local baseDestroy = el.Destroy
+	Method(el, "Destroy", function()
+		StopPicking()
+		if active then SetActive(false) end
+		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+		table.clear(conns)
+		if touchConn then pcall(function() touchConn:Disconnect() end) end
+		if entry and W.KBList then W.KBList.Remove(entry) end
+		entry = nil
+		baseDestroy()
+	end)
+	local baseEnabled = el.SetEnabled
+	Method(el, "SetEnabled", function(b)
+		if b == false then
+			StopPicking()
+			if mode == "Hold" then SetActive(false) end
+		end
+		baseEnabled(b)
+		ListRefresh()
+	end)
+	local baseVisible = el.SetVisible
+	Method(el, "SetVisible", function(b)
+		baseVisible(b)
+		ListRefresh()
+	end)
+	local defaultKey = key
+	local defaultActive = active
+	function el._reset()
+		StopPicking()
+		SetKey(defaultKey, true)
+		SetActive(defaultActive and mode == "Toggle")
+	end
+	return Finish(el, o)
+end
+
+local function AddLabel(W, S, o)
+	if type(o) ~= "table" then o = {Text = o} end
+	local el, row = NewElement(W, S, "Label", {Enabled = o.Enabled, Disabled = o.Disabled, Visible = o.Visible}, 0)
+	row.AutomaticSize = Enum.AutomaticSize.Y
+	local text = tostring(o.Text or o.Name or o.Title or "Label")
+	local lbl = Label(row, text, {
+		Size = UDim2.new(1, 0, 0, 15),
+		Align = o.Center and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left,
+		TextSize = o.TextSize,
+	})
+	lbl.AutomaticSize = Enum.AutomaticSize.Y
+	lbl.TextWrapped = true
+	lbl.RichText = o.RichText == true
+	local color = ToColor(o.Color)
+	function el._apply()
+		local T = W.Theme
+		lbl.TextColor3 = not el.Enabled and T.TextDim or (color or T.TextGray)
+	end
+	W.Bind(function() el._apply() end, row)
+	Method(el, "Set", function(t) text = tostring(t) lbl.Text = text end)
+	Method(el, "Get", function() return text end)
+	el.SetText, el.SetName = el.Set, el.Set
+	Method(el, "SetColor", function(c) color = ToColor(c) el._apply() end)
+	if o.DependsOn then el.DependsOn(o.DependsOn, o.InvertDependency) end
+	el._apply()
+	return el
+end
+
+local function AddParagraph(W, S, o)
+	o = Opts(o)
+	local el, row = NewElement(W, S, "Paragraph", {Enabled = o.Enabled, Disabled = o.Disabled, Visible = o.Visible}, 0)
+	row.AutomaticSize = Enum.AutomaticSize.Y
+	local box = Create("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BorderSizePixel = 0, Parent = row})
+	Corner(box, 3)
+	local st = Stroke(box, WHITE, 1)
+	Create("UIPadding", {
+		PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9),
+		PaddingTop = UDim.new(0, 7), PaddingBottom = UDim.new(0, 8),
+		Parent = box,
+	})
+	Create("UIListLayout", {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder, Parent = box})
+	local title = Label(box, o.Title or o.Name or "Paragraph", {Size = UDim2.new(1, 0, 0, 14), Weight = "SemiBold", Truncate = true})
+	title.LayoutOrder = 1
+	local body = Label(box, o.Content or o.Text or o.Description or "", {Size = UDim2.new(1, 0, 0, 0), TextSize = 10})
+	body.AutomaticSize = Enum.AutomaticSize.Y
+	body.TextWrapped = true
+	body.RichText = o.RichText == true
+	body.LayoutOrder = 2
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		box.BackgroundColor3 = T.DropdownBg
+		st.Color = enabled and T.DropdownBorder or T.DropdownBorderOff
+		title.TextColor3 = enabled and T.Text or T.TextDim
+		body.TextColor3 = enabled and T.TextGray or T.TextDim
+	end
+	W.Bind(function() el._apply() end, row)
+	Method(el, "SetTitle", function(t) title.Text = tostring(t) end)
+	Method(el, "SetContent", function(t) body.Text = tostring(t or "") body.Visible = body.Text ~= "" end)
+	el.SetName, el.SetText, el.Set = el.SetTitle, el.SetContent, el.SetContent
+	Method(el, "Get", function() return body.Text end)
+	body.Visible = body.Text ~= ""
+	if o.DependsOn then el.DependsOn(o.DependsOn, o.InvertDependency) end
+	el._apply()
+	return el
+end
+
+local function AddDivider(W, S, o)
+	if type(o) ~= "table" then o = {Text = o} end
+	local el, row = NewElement(W, S, "Divider", {Visible = o.Visible}, 11)
+	local text = o.Text or o.Name or o.Title
+	local left = Create("Frame", {Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0.5, 0), BorderSizePixel = 0, Parent = row})
+	local right = Create("Frame", {Size = UDim2.new(0, 0, 0, 1), AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0.5, 0), BorderSizePixel = 0, Parent = row})
+	local lbl = Label(row, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10, Align = Enum.TextXAlignment.Center})
+	lbl.AnchorPoint = Vector2.new(0.5, 0)
+	lbl.Position = UDim2.fromScale(0.5, 0)
+	local function Layout()
+		local has = text ~= nil and tostring(text) ~= ""
+		lbl.Visible = has
+		lbl.Text = has and tostring(text) or ""
+		right.Visible = has
+		if has then
+			local half = math.floor(TextWidth(lbl.Text, 10) / 2 + 8)
+			left.Size = UDim2.new(0.5, -half, 0, 1)
+			right.Size = UDim2.new(0.5, -half, 0, 1)
+		else
+			left.Size = UDim2.new(1, 0, 0, 1)
+		end
+	end
+	Layout()
+	W.Bind(function(T)
+		left.BackgroundColor3 = T.Divider
+		right.BackgroundColor3 = T.Divider
+		lbl.TextColor3 = T.TextDim
+	end, row)
+	Method(el, "SetText", function(t) text = t Layout() end)
+	el.SetName = el.SetText
+	Method(el, "Get", function() return text end)
+	return el
+end
+
+-- Readable foreground for text/icons drawn on top of the accent color.
+local function OnAccent(W)
+	if W.AccentAlpha < 0.5 then return W.Theme.Text end
+	local c = W.Accent
+	local l = 0.299 * c.R + 0.587 * c.G + 0.114 * c.B
+	return l > 0.62 and rgb(20, 20, 24) or WHITE
+end
+
+local EL_TI = TweenInfo.new(0.14, Enum.EasingStyle.Quad)
+local MOVE_TI = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+local function AddSegmented(W, S, o)
+	o = Opts(o)
+	local options = CopyList(o.Options or o.Values or o.List)
+	local name = o.Name or o.Title
+	local top = name and 19 or 0
+	local el, row = NewElement(W, S, "Segmented", o, top + 25)
+	local value = o.Default or o.Value
+	if not IndexOf(options, value) then value = options[1] end
+	el.Value = value
+
+	local lbl = name and Label(row, name, {Size = UDim2.new(1, 0, 0, 15), Truncate = true}) or nil
+	local bar = Create("Frame", {Size = UDim2.new(1, 0, 0, 25), Position = UDim2.fromOffset(0, top), BorderSizePixel = 0, Parent = row})
+	Corner(bar, 5)
+	local bs = Stroke(bar, WHITE, 1)
+	local ind = Create("Frame", {BorderSizePixel = 0, ZIndex = 2, Parent = bar})
+	Corner(ind, 4)
+	local buttons = {}
+
+	local function Layout(animate)
+		local n = math.max(#options, 1)
+		local i = IndexOf(options, value)
+		ind.Visible = i ~= nil
+		if not i then return end
+		local props = {Position = UDim2.new((i - 1) / n, 2, 0, 2), Size = UDim2.new(1 / n, -4, 1, -4)}
+		if animate then
+			Tween(ind, MOVE_TI, props)
+		else
+			StopTweens(ind)
+			ind.Position, ind.Size = props.Position, props.Size
+		end
+	end
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		bar.BackgroundColor3 = T.DropdownBg
+		bs.Color = enabled and T.DropdownBorder or T.DropdownBorderOff
+		ind.BackgroundColor3 = W.Accent
+		ind.BackgroundTransparency = 1 - W.AccentAlpha * (enabled and 1 or 0.45)
+		if lbl then lbl.TextColor3 = enabled and T.TextGray or T.TextDim end
+		for i, b in ipairs(buttons) do
+			local sel = options[i] == value
+			b.TextColor3 = not enabled and T.TextDim or (sel and OnAccent(W) or T.TextGray)
+			ApplyFont(b, sel and "SemiBold" or "Medium")
+		end
+	end
+
+	local function Build()
+		for _, b in ipairs(buttons) do b:Destroy() end
+		table.clear(buttons)
+		local n = math.max(#options, 1)
+		for i, opt in ipairs(options) do
+			local b = Create("TextButton", {
+				Size = UDim2.new(1 / n, 0, 1, 0),
+				Position = UDim2.new((i - 1) / n, 0, 0, 0),
+				BackgroundTransparency = 1,
+				Text = tostring(opt),
+				TextSize = TEXT,
+				Weight = "Medium",
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				AutoButtonColor = false,
+				ZIndex = 3,
+				Parent = bar,
+			})
+			b.MouseButton1Click:Connect(function() if el.Enabled then el.Set(opt) end end)
+			buttons[i] = b
+		end
+		Layout(false)
+		el._apply()
+	end
+	W.Bind(function() el._apply() end, row)
+	Build()
+
+	local function Commit(changed, silent)
+		el.Value = value
+		el._apply()
+		if changed and not silent then el._fire(value) else el._sync(value) end
+	end
+	Method(el, "Set", function(v, silent)
+		if not IndexOf(options, v) then return end
+		local changed = v ~= value
+		value = v
+		Layout(true)
+		Commit(changed, silent)
+	end)
+	Method(el, "Get", function() return value end)
+	Method(el, "GetOptions", function() return CopyList(options) end)
+	Method(el, "SetOptions", function(list, silent)
+		local before = value
+		options = CopyList(list)
+		if not IndexOf(options, value) then value = options[1] end
+		Build()
+		Commit(value ~= before, silent)
+	end)
+	Method(el, "SetName", function(t) if lbl then lbl.Text = tostring(t) end end)
+	return Finish(el, o)
+end
+
+local function AddProgressBar(W, S, o)
+	o = Opts(o)
+	local el, row = NewElement(W, S, "ProgressBar", {Enabled = o.Enabled, Disabled = o.Disabled, Visible = o.Visible}, 23)
+	local maxV = tonumber(o.Max) or 100
+	if maxV <= 0 then maxV = 100 end
+	local value = math.clamp(tonumber(o.Default or o.Value) or 0, 0, maxV)
+	el.Value = value
+
+	local lbl = Label(row, o.Name or o.Title or "Progress", {Size = UDim2.new(0.65, 0, 0, 15), Truncate = true})
+	local valLbl = Label(row, "", {Position = UDim2.new(0.65, 0, 0, 0), Size = UDim2.new(0.35, 0, 0, 15), Align = Enum.TextXAlignment.Right})
+	local track = Create("Frame", {Size = UDim2.new(1, 0, 0, 4), Position = UDim2.fromOffset(0, 17), BorderSizePixel = 0, Parent = row})
+	Corner(track, 2)
+	local fill = Create("Frame", {Size = UDim2.fromScale(0, 1), BorderSizePixel = 0, Parent = track})
+	Corner(fill, 2)
+
+	local function Text()
+		if type(o.Format) == "function" then return tostring(SafeCall(o.Format, value, maxV) or "") end
+		if o.ShowValue then
+			return FormatNumber(value, Decimals(o.Step or 1)) .. " / " .. FormatNumber(maxV, Decimals(o.Step or 1))
+		end
+		return math.floor(value / maxV * 100 + 0.5) .. "%"
+	end
+	local function Layout(animate)
+		local props = {Size = UDim2.fromScale(value / maxV, 1)}
+		if animate then
+			Tween(fill, TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+		else
+			StopTweens(fill)
+			fill.Size = props.Size
+		end
+		valLbl.Text = Text()
+	end
+	Layout(false)
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		lbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		valLbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		track.BackgroundColor3 = T.SliderTrack
+		fill.BackgroundColor3 = W.Accent
+		fill.BackgroundTransparency = 1 - W.AccentAlpha * (enabled and 1 or 0.45)
+	end
+	W.Bind(function() el._apply() end, row)
+
+	Method(el, "Set", function(v, instant)
+		v = math.clamp(tonumber(v) or 0, 0, maxV)
+		if v == value then return end
+		value = v
+		el.Value = v
+		Layout(not instant)
+		el._fire(v)
+	end)
+	Method(el, "Get", function() return value end)
+	Method(el, "Increment", function(d) el.Set(value + (tonumber(d) or 1)) end)
+	Method(el, "SetMax", function(m)
+		m = tonumber(m)
+		if not m or m <= 0 then return end
+		maxV = m
+		value = math.min(value, maxV)
+		el.Value = value
+		Layout(true)
+	end)
+	Method(el, "GetMax", function() return maxV end)
+	Method(el, "SetName", function(t) lbl.Text = tostring(t) end)
+	local defaultValue = value
+	function el._reset() el.Set(defaultValue, true) end
+	if o.DependsOn then el.DependsOn(o.DependsOn, o.InvertDependency) end
+	el._apply()
+	return el
+end
+
+local function AddRangeSlider(W, S, o)
+	o = Opts(o)
+	local EXTRA = 2
+	local el, row = NewElement(W, S, "RangeSlider", o, 28 + EXTRA)
+	local minV, maxV = tonumber(o.Min) or 0, tonumber(o.Max) or 100
+	if maxV <= minV then maxV = minV + 1 end
+	local step = tonumber(o.Step or o.Increment) or 1
+	local decimals = o.Decimals or Decimals(step)
+
+	local function Round(v)
+		v = tonumber(v) or minV
+		if step > 0 then v = math.floor((v - minV) / step + 0.5) * step + minV end
+		v = math.clamp(v, minV, maxV)
+		return tonumber(FormatNumber(v, decimals)) or v
+	end
+	local def = o.Default or o.Value
+	if type(def) ~= "table" then def = {minV, maxV} end
+	local lo, hi = Round(def[1] or def.Min or minV), Round(def[2] or def.Max or maxV)
+	if lo > hi then lo, hi = hi, lo end
+	local function Value() return {lo, hi} end
+	el.Value = Value()
+
+	local function Fmt(v)
+		if type(o.Format) == "function" then return tostring(o.Format(v)) end
+		return FormatNumber(v, decimals) .. (o.Suffix or "")
+	end
+
+	local lbl = Label(row, o.Name or o.Title or "Range", {Position = UDim2.fromOffset(0, EXTRA), Size = UDim2.new(0.5, 0, 0, 15), Truncate = true})
+	local valLbl = Label(row, "", {Position = UDim2.new(0.5, 0, 0, EXTRA), Size = UDim2.new(0.5, 0, 0, 15), Align = Enum.TextXAlignment.Right})
+	local hit = Create("Frame", {Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, EXTRA + 12.5), BackgroundTransparency = 1, Active = true, Parent = row})
+	local track = Create("Frame", {Size = UDim2.new(1, 0, 0, 4), Position = UDim2.new(0, 0, 0.5, -2), BorderSizePixel = 0, Parent = hit})
+	Corner(track, 2)
+	local R = 5.5
+	local fill = Create("Frame", {BorderSizePixel = 0, Parent = track})
+	local knobs, strokes = {}, {}
+	for i = 1, 2 do
+		knobs[i] = Create("Frame", {Size = UDim2.fromOffset(7, 7), BorderSizePixel = 0, ZIndex = 3, Parent = track})
+		Corner(knobs[i], 4)
+		strokes[i] = Stroke(knobs[i], WHITE, 2)
+	end
+
+	local function P(v) return (v - minV) / (maxV - minV) end
+	local function Layout(animate)
+		local a, b = P(lo), P(hi)
+		local fp = UDim2.new(a, R * (1 - 2 * a), 0, 0)
+		local fs = UDim2.new(b - a, 2 * R * (a - b), 1, 0)
+		local k1 = UDim2.new(a, R * (1 - 2 * a) - 3.5, 0.5, -3.5)
+		local k2 = UDim2.new(b, R * (1 - 2 * b) - 3.5, 0.5, -3.5)
+		if animate then
+			local ti = TweenInfo.new(0.12, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+			Tween(fill, ti, {Position = fp, Size = fs})
+			Tween(knobs[1], ti, {Position = k1})
+			Tween(knobs[2], ti, {Position = k2})
+		else
+			StopTweens(fill, knobs[1], knobs[2])
+			fill.Position, fill.Size = fp, fs
+			knobs[1].Position, knobs[2].Position = k1, k2
+		end
+		valLbl.Text = Fmt(lo) .. " - " .. Fmt(hi)
+	end
+	Layout(false)
+
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		lbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		valLbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		track.BackgroundColor3 = T.SliderTrack
+		fill.BackgroundColor3 = W.Accent
+		fill.BackgroundTransparency = 1 - W.AccentAlpha * (enabled and 1 or 0.45)
+		for i = 1, 2 do
+			knobs[i].BackgroundColor3 = T.KnobFill
+			strokes[i].Color = enabled and T.KnobStroke or T.KnobStrokeOff
+		end
+	end
+	W.Bind(function() el._apply() end, row)
+
+	local function SetValues(a, b, silent, animate)
+		a, b = Round(a), Round(b)
+		if a > b then a, b = b, a end
+		local changed = a ~= lo or b ~= hi
+		lo, hi = a, b
+		el.Value = Value()
+		Layout(animate ~= false)
+		if changed and not silent then el._fire(el.Value) else el._sync(el.Value) end
+	end
+
+	local active
+	local function ValueAt(input)
+		local sc = W.Scale.Scale
+		local left = track.AbsolutePosition.X + R * sc
+		local width = track.AbsoluteSize.X - 2 * R * sc
+		if width <= 0 then return nil end
+		return minV + (maxV - minV) * math.clamp((input.Position.X - left) / width, 0, 1)
+	end
+	local function Update(input)
+		local v = ValueAt(input)
+		if not v then return end
+		if active == 1 then
+			SetValues(math.min(v, hi), hi)
+		else
+			SetValues(lo, math.max(v, lo))
+		end
+	end
+	hit.InputBegan:Connect(function(input)
+		if not (el.Enabled and IsClickOrTouch(input)) then return end
+		local v = ValueAt(input)
+		if not v then return end
+		if v <= lo then
+			active = 1
+		elseif v >= hi then
+			active = 2
+		else
+			active = (v - lo <= hi - v) and 1 or 2
+		end
+		if W.BeginDrag(input, Update) then Update(input) end
+	end)
+
+	Method(el, "Set", function(v, silent)
+		if type(v) ~= "table" then return end
+		SetValues(v[1] or v.Min or lo, v[2] or v.Max or hi, silent)
+	end)
+	Method(el, "SetValues", function(a, b, silent) SetValues(a or lo, b or hi, silent) end)
+	Method(el, "Get", Value)
+	Method(el, "GetMin", function() return lo end)
+	Method(el, "GetMax", function() return hi end)
+	Method(el, "SetRange", function(mn, mx)
+		minV, maxV = tonumber(mn) or minV, tonumber(mx) or maxV
+		if maxV <= minV then maxV = minV + 1 end
+		SetValues(lo, hi)
+	end)
+	Method(el, "SetName", function(t) lbl.Text = tostring(t) end)
+	Method(el, "SetSuffix", function(s) o.Suffix = s Layout(false) end)
+	return Finish(el, o)
+end
+
+local function AddStepper(W, S, o)
+	o = Opts(o)
+	local el, row = NewElement(W, S, "Stepper", o, 25)
+	local minV, maxV = tonumber(o.Min) or 0, tonumber(o.Max) or 100
+	if maxV < minV then minV, maxV = maxV, minV end
+	local step = tonumber(o.Step or o.Increment) or 1
+	if step <= 0 then step = 1 end
+	local decimals = o.Decimals or Decimals(step)
+	local function Round(v)
+		v = tonumber(v)
+		if not v or v ~= v then return nil end
+		v = math.floor((v - minV) / step + 0.5) * step + minV
+		v = math.clamp(v, minV, maxV)
+		return tonumber(FormatNumber(v, decimals)) or v
+	end
+	local value = Round(o.Default or o.Value) or minV
+	el.Value = value
+
+	local W_BTN, W_VAL = 23, 48
+	local total = W_BTN * 2 + W_VAL
+	local lbl = Label(row, o.Name or o.Title or "Stepper", {Size = UDim2.new(1, -(total + 8), 1, 0), Truncate = true})
+	local frame = Create("Frame", {
+		Size = UDim2.fromOffset(total, 25),
+		Position = UDim2.new(1, -total, 0, 0),
+		BorderSizePixel = 0,
+		Parent = row,
+	})
+	Corner(frame, 5)
+	local fs = Stroke(frame, WHITE, 1)
+	local function SideButton(x, icon)
+		local b = Create("TextButton", {Size = UDim2.fromOffset(W_BTN, 25), Position = UDim2.fromOffset(x, 0), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 2, Parent = frame})
+		local ic = CreateIcon(b, icon, 10, UDim2.new(0.5, -5, 0.5, -5))
+		return b, ic
+	end
+	local minus, minusIc = SideButton(0, {"minus"})
+	local plus, plusIc = SideButton(W_BTN + W_VAL, {"plus"})
+	local seps = {}
+	for i, x in ipairs({W_BTN, W_BTN + W_VAL - 1}) do
+		seps[i] = Create("Frame", {Size = UDim2.fromOffset(1, 13), Position = UDim2.fromOffset(x, 6), BorderSizePixel = 0, Parent = frame})
+	end
+	local box = Create("TextBox", {
+		Size = UDim2.fromOffset(W_VAL, 25),
+		Position = UDim2.fromOffset(W_BTN, 0),
+		BackgroundTransparency = 1,
+		Text = "",
+		ClearTextOnFocus = false,
+		TextSize = TEXT,
+		Weight = "Medium",
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 2,
+		Parent = frame,
+	})
+
+	local hoverMinus, hoverPlus = false, false
+	function el._apply()
+		local T, enabled = W.Theme, el.Enabled
+		lbl.TextColor3 = enabled and T.TextGray or T.TextDim
+		frame.BackgroundColor3 = T.DropdownBg
+		fs.Color = enabled and T.DropdownBorder or T.DropdownBorderOff
+		box.TextColor3 = enabled and T.Text or T.ValueOff
+		box.TextEditable = enabled
+		local canDown, canUp = enabled and value > minV, enabled and value < maxV
+		minusIc.ImageColor3 = not canDown and T.TextDim or (hoverMinus and T.Text or T.TextGray)
+		plusIc.ImageColor3 = not canUp and T.TextDim or (hoverPlus and T.Text or T.TextGray)
+		for _, s in ipairs(seps) do s.BackgroundColor3 = T.DropdownBorder end
+	end
+	W.Bind(function() el._apply() end, row)
+
+	local function Show() box.Text = FormatNumber(value, decimals) .. (o.Suffix or "") end
+	local function SetValue(v, silent)
+		v = Round(v)
+		if not v then Show() return end
+		local changed = v ~= value
+		value = v
+		el.Value = v
+		Show()
+		el._apply()
+		if changed and not silent then el._fire(v) else el._sync(v) end
+	end
+	Show()
+
+	local holdToken = 0
+	local function StopHold() holdToken = holdToken + 1 end
+	local function StartHold(dir)
+		StopHold()
+		local token = holdToken
+		SetValue(value + dir * step)
+		task.delay(0.4, function()
+			while token == holdToken and row.Parent and el.Enabled do
+				local before = value
+				SetValue(value + dir * step)
+				if value == before then break end
+				task.wait(0.06)
+			end
+		end)
+	end
+	for _, pair in ipairs({{minus, -1}, {plus, 1}}) do
+		local b, dir = pair[1], pair[2]
+		b.InputBegan:Connect(function(input)
+			if el.Enabled and IsClickOrTouch(input) then StartHold(dir) end
+		end)
+		b.InputEnded:Connect(function(input)
+			if IsClickOrTouch(input) then StopHold() end
+		end)
+		b.MouseEnter:Connect(function()
+			if dir < 0 then hoverMinus = true else hoverPlus = true end
+			el._apply()
+		end)
+		b.MouseLeave:Connect(function()
+			StopHold()
+			if dir < 0 then hoverMinus = false else hoverPlus = false end
+			el._apply()
+		end)
+	end
+	box.Focused:Connect(function() box.Text = FormatNumber(value, decimals) end)
+	box.FocusLost:Connect(function()
+		local text = box.Text:gsub("[^%d%.%-]", "")
+		SetValue(tonumber(text) or value)
+	end)
+
+	Method(el, "Set", function(v, silent) SetValue(v, silent) end)
+	Method(el, "Get", function() return value end)
+	Method(el, "Increment", function(n) SetValue(value + (tonumber(n) or 1) * step) end)
+	Method(el, "Decrement", function(n) SetValue(value - (tonumber(n) or 1) * step) end)
+	Method(el, "SetRange", function(mn, mx)
+		minV, maxV = tonumber(mn) or minV, tonumber(mx) or maxV
+		if maxV < minV then minV, maxV = maxV, minV end
+		SetValue(value)
+	end)
+	Method(el, "SetName", function(t) lbl.Text = tostring(t) end)
+	local baseDestroy = el.Destroy
+	Method(el, "Destroy", function() StopHold() baseDestroy() end)
+	return Finish(el, o)
+end
+
+local ELEMENT_KINDS = {
+	"Toggle", "Slider", "Dropdown", "MultiDropdown", "Button", "CardButton", "ColorPicker", "Input", "Keybind",
+	"Label", "Paragraph", "Divider", "Segmented", "ProgressBar", "RangeSlider", "Stepper",
+}
 
 function ElementApi(W, S)
 	Method(S, "AddToggle", function(x) return AddToggle(W, S, x) end)
@@ -1687,6 +2874,17 @@ function ElementApi(W, S)
 	Method(S, "AddMultiDropdown", function(x) return AddDropdown(W, S, x, true) end)
 	Method(S, "AddColorPicker", function(x) return AddColorPicker(W, S, x) end)
 	Method(S, "AddCardButton", function(x) return AddCardButton(W, S, x) end)
+	Method(S, "AddInput", function(x) return AddInput(W, S, x) end)
+	Method(S, "AddKeybind", function(x) return AddKeybind(W, S, x) end)
+	Method(S, "AddLabel", function(x) return AddLabel(W, S, x) end)
+	Method(S, "AddParagraph", function(x) return AddParagraph(W, S, x) end)
+	Method(S, "AddDivider", function(x) return AddDivider(W, S, x) end)
+	S.AddTextbox, S.AddTextBox = S.AddInput, S.AddInput
+	Method(S, "AddSegmented", function(x) return AddSegmented(W, S, x) end)
+	Method(S, "AddProgressBar", function(x) return AddProgressBar(W, S, x) end)
+	Method(S, "AddRangeSlider", function(x) return AddRangeSlider(W, S, x) end)
+	Method(S, "AddStepper", function(x) return AddStepper(W, S, x) end)
+	S.AddProgress, S.AddNumber = S.AddProgressBar, S.AddStepper
 	Method(S, "AddButton", function(x)
 		x = Opts(x)
 		if x.Icon or x.Description or x.Desc or x.ButtonText then return AddCardButton(W, S, x) end
@@ -2173,8 +3371,13 @@ local function BuildWatermark(W, cfg)
 	end)
 
 	local api = {}
-	Method(api, "SetVisible", function(b) frame.Visible = b ~= false end)
-	Method(api, "IsVisible", function() return frame.Visible end)
+	local wanted = frame.Visible
+	Method(api, "SetVisible", function(b)
+		wanted = b ~= false
+		frame.Visible = wanted and not W.KeyLocked
+	end)
+	Method(api, "IsVisible", function() return wanted end)
+	function WM.ApplyLock() frame.Visible = wanted and not W.KeyLocked end
 	Method(api, "Toggle", function() frame.Visible = not frame.Visible end)
 	Method(api, "SetTitle", function(t) WM.TitleItem.label.Text = tostring(t) end)
 	Method(api, "SetSite", function(t) WM.SetSite(t) end)
@@ -2236,7 +3439,7 @@ local function Notify(W, o)
 		Parent = holder,
 	})
 	Corner(card, 4)
-	Stroke(card, T.DropdownBorder, 1)
+	local cardStroke = Stroke(card, T.DropdownBorder, 1)
 	Create("UIPadding", {
 		PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10),
 		PaddingTop = UDim.new(0, 9), PaddingBottom = UDim.new(0, 12),
@@ -2245,13 +3448,15 @@ local function Notify(W, o)
 	Create("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder, Parent = card})
 	local top = Create("Frame", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, LayoutOrder = 1, Parent = card})
 	local x = 0
+	local nIcon, nContent
 	if o.Icon ~= false then
-		CreateIcon(top, o.Icon or "bell", 12, UDim2.new(0, 0, 0.5, -6), W.Accent)
+		nIcon = CreateIcon(top, o.Icon or "bell", 12, UDim2.new(0, 0, 0.5, -6), W.Accent)
 		x = 18
 	end
-	Label(top, o.Title or W.Title, {Position = UDim2.fromOffset(x, 0), Size = UDim2.new(1, -x, 1, 0), Color = T.Text, Weight = "SemiBold", Truncate = true})
+	local nTitle = Label(top, o.Title or W.Title, {Position = UDim2.fromOffset(x, 0), Size = UDim2.new(1, -x, 1, 0), Color = T.Text, Weight = "SemiBold", Truncate = true})
 	if o.Content or o.Text then
 		local c = Label(card, o.Content or o.Text, {Size = UDim2.new(1, 0, 0, 0), Color = T.TextGray})
+		nContent = c
 		c.AutomaticSize = Enum.AutomaticSize.Y
 		c.TextWrapped = true
 		c.LayoutOrder = 2
@@ -2266,8 +3471,17 @@ local function Notify(W, o)
 		Parent = barHost,
 	})
 	Corner(bar, 1)
+	W.Bind(function(th, accent, alpha)
+		card.BackgroundColor3 = th.CardBg
+		cardStroke.Color = th.DropdownBorder
+		nTitle.TextColor3 = th.Text
+		if nContent then nContent.TextColor3 = th.TextGray end
+		if nIcon then nIcon.ImageColor3 = accent end
+		bar.BackgroundColor3 = accent
+		bar.BackgroundTransparency = 1 - alpha
+	end, holder)
 
-	local duration = o.Duration or o.Time or 4
+	local duration = math.max(tonumber(o.Duration or o.Time) or 4, 0.1)
 	Tween(card, TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = UDim2.fromOffset(0, 0)})
 	Tween(bar, TweenInfo.new(duration, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 0, 2)})
 	local closed = false
@@ -2600,6 +3814,7 @@ local function BuildNavigation(W)
 				if it.letter then Tween(it.letter, SUB_TI, {TextTransparency = active and 1 or 0}) end
 				if iconProps then Tween(it.icon, SUB_TI, iconProps) end
 			else
+				StopTweens(it.btn, it.label, it.letter, it.icon)
 				it.btn.Position, it.btn.Size = props.Position, props.Size
 				it.label.TextTransparency = active and 0 or 1
 				if it.letter then it.letter.TextTransparency = active and 1 or 0 end
@@ -2617,6 +3832,7 @@ local function BuildNavigation(W)
 		if animate and ind.BackgroundTransparency < 1 then
 			Tween(ind, SUB_TI, props)
 		else
+			StopTweens(ind)
 			ind.Position, ind.Size, ind.BackgroundTransparency = props.Position, props.Size, 0
 		end
 	end
@@ -2731,6 +3947,7 @@ local function BuildNavigation(W)
 
 	W.Bind(function(T)
 		for _, t in ipairs(W.Tabs) do
+			StopTweens(t.Label)
 			t.Label.TextColor3 = (W.Nav.main == t) and T.Text or T.NavGray
 		end
 		W.RefreshAccentIcons()
@@ -2883,6 +4100,20 @@ local function BuildSettings(W, o)
 		Flag = "__ZeninWmDetails",
 		Callback = function(v) W.WM.SetModes(v) end,
 	})
+
+	if W.KBList then
+		local kl = NewSection(W, page, {Name = "Keybind List", Side = "Right"})
+		kl.AddToggle({
+			Name = "Show List", Default = W.KBList.Wanted,
+			Flag = "__ZeninKbList",
+			Callback = function(v) W.KeybindListApi.SetVisible(v) end,
+		})
+		kl.AddToggle({
+			Name = "Show Inactive", Default = W.KBList.ShowInactive,
+			Flag = "__ZeninKbInactive",
+			Callback = function(v) W.KeybindListApi.SetShowInactive(v) end,
+		})
+	end
 	return api
 end
 
@@ -2983,8 +4214,8 @@ local function BuildConfigManager(W, Window, o)
 	local function Apply(data)
 		if type(data) ~= "table" then return false, "invalid config" end
 		if CFG.Interface then
-			local c = type(data.Accent) == "string" and FromHex(data.Accent)
-			if c then W.SetAccent(c, tonumber(data.AccentAlpha)) end
+			local c = FromHex(data.Accent)
+			if c then W.SetAccentExternal(c, data.AccentAlpha) end
 		end
 		local pending = {}
 		local flags = type(data.Flags) == "table" and data.Flags or {}
@@ -3017,8 +4248,6 @@ local function BuildConfigManager(W, Window, o)
 		if type(text) ~= "string" then return nil, "empty" end
 		text = text:gsub("^%s+", ""):gsub("%s+$", "")
 		if text == "" then return nil, "empty" end
-		-- Configs saved by old versions with encryption on can't be read anymore.
-		if text:sub(1, 5) == "ZENC:" then return nil, "old encrypted config, save it again" end
 		local ok, data = pcall(HttpService.JSONDecode, HttpService, text)
 		if not ok or type(data) ~= "table" then return nil, "invalid config" end
 		return data
@@ -3382,9 +4611,460 @@ local function BuildConfigs(W, Window)
 	return api
 end
 
+local function GetHwid()
+	if type(gethwid) == "function" then
+		local ok, r = pcall(gethwid)
+		if ok and r then return tostring(r) end
+	end
+	local ok, r = pcall(function() return game:GetService("RbxAnalyticsService"):GetClientId() end)
+	if ok and r then return tostring(r) end
+	return tostring(LocalPlayer and LocalPlayer.UserId or "")
+end
+
+local function HttpGetBody(url)
+	local req = (syn and syn.request) or (http and http.request) or http_request or request
+	if req then
+		local ok, r = pcall(req, {Url = url, Method = "GET"})
+		if ok and type(r) == "table" and type(r.Body) == "string" then return r.Body, r.StatusCode end
+	end
+	local ok, r = pcall(function() return game:HttpGet(url) end)
+	if ok and type(r) == "string" then return r, 200 end
+	return nil, nil
+end
+
+local function BodyIsValid(body)
+	local trimmed = tostring(body or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	local low = trimmed:lower()
+	if low == "true" or low == "valid" or low == "ok" or low == "1" or low == "success" then return true end
+	local ok, data = pcall(function() return HttpService:JSONDecode(trimmed) end)
+	if ok and type(data) == "table" then
+		local exp = data.expires or data.expiresAt or data.expires_at or data.expiry or data.expire or data.Expires
+		if data.valid == true or data.success == true or data.Valid == true or data.Success == true then return true, nil, exp end
+		return false, data.message or data.Message or data.error
+	end
+	return false
+end
+
+local function Now() return os.time() end
+
+-- Unix seconds; millisecond timestamps are converted.
+local function ParseExpiry(v)
+	v = tonumber(v)
+	if not v or v ~= v or v <= 0 then return nil end
+	if v > 1e12 then v = v / 1000 end
+	return math.floor(v)
+end
+
+local function FormatDuration(sec)
+	sec = math.max(0, math.floor(tonumber(sec) or 0))
+	local d = math.floor(sec / 86400)
+	local h = math.floor(sec % 86400 / 3600)
+	local m = math.floor(sec % 3600 / 60)
+	local s = sec % 60
+	if d > 0 then return ("%dd %dh"):format(d, h) end
+	if h > 0 then return ("%dh %02dm"):format(h, m) end
+	if m > 0 then return ("%dm %02ds"):format(m, s) end
+	return ("%ds"):format(s)
+end
+
+-- Verification + saved-key storage, shared by the first prompt and later re-checks.
+local function KeyBackend(ks, ctx)
+	local B = {}
+	local staticKeys = {}
+	local keyList = ks.Keys or ks.Key
+	if type(keyList) == "string" then keyList = {keyList} end
+	-- Keys = {"a", "b"} never expire; Keys = {["a"] = unixExpiry} expire at that time.
+	for k, v in pairs(type(keyList) == "table" and keyList or {}) do
+		if type(k) == "number" then
+			staticKeys[tostring(v)] = true
+		else
+			staticKeys[tostring(k)] = v
+		end
+	end
+	local hwid = GetHwid()
+	B.Hwid = hwid
+	local hasRemote = (type(ks.Url) == "string" and ks.Url ~= "") or type(ks.Verify) == "function"
+
+	-- Returns valid, message, expires, definitive (false when the server simply couldn't be reached).
+	local function Check(key)
+		if key == "" then return false, "Enter a key", nil, true end
+		local st = staticKeys[key]
+		if st ~= nil and st ~= false then
+			if st == true then return true end
+			return true, nil, ParseExpiry(st)
+		end
+		local lastMsg, reached = nil, not hasRemote
+		if type(ks.Url) == "string" and ks.Url ~= "" then
+			local url = ks.Url:gsub("{key}", function() return HttpService:UrlEncode(key) end)
+				:gsub("{hwid}", function() return HttpService:UrlEncode(hwid) end)
+			local body, code = HttpGetBody(url)
+			if body then
+				reached = true
+				local ok, msg, exp
+				if type(ks.Validate) == "function" then
+					ok, msg, exp = ks.Validate(body, key, code)
+				else
+					ok, msg, exp = BodyIsValid(body)
+				end
+				if ok == true then
+					if type(msg) == "number" then exp = msg end
+					return true, nil, ParseExpiry(exp)
+				end
+				lastMsg = type(msg) == "string" and msg or nil
+			else
+				lastMsg = "Could not reach key server"
+			end
+		end
+		if type(ks.Verify) == "function" then
+			reached = true
+			local ok, a, b = ks.Verify(key, hwid, LocalPlayer)
+			if ok == true then
+				local exp = b
+				if type(a) == "number" then exp = a end
+				if type(a) == "table" then exp = a.Expires or a.expires end
+				return true, nil, ParseExpiry(exp)
+			end
+			if type(a) == "string" then lastMsg = a end
+		end
+		return false, lastMsg or "Invalid key", nil, reached
+	end
+
+	function B.Check(key, activated)
+		local ok, valid, msg, exp, definitive = pcall(Check, tostring(key or ""))
+		if not ok then return false, "Verification error", nil, false end
+		if not valid then return false, msg, nil, definitive end
+		local dur = tonumber(ks.Duration)
+		if dur and dur > 0 then
+			local local_exp = math.floor((tonumber(activated) or Now()) + dur)
+			exp = exp and math.min(exp, local_exp) or local_exp
+		end
+		if exp and exp <= Now() then return false, "Key expired", nil, true end
+		return true, nil, exp, true
+	end
+
+	local folder = ks.Folder or ctx.Folder
+	local fileName = ks.FileName or ((ctx.GuiName or Library.GuiName) .. "_key.txt")
+	local savePath = (folder and folder ~= "") and (folder .. "/" .. fileName) or fileName
+	function B.Save(key, activated)
+		if ks.SaveKey == false or not writefile then return end
+		if folder and folder ~= "" and isfolder and makefolder then
+			local cur = ""
+			for part in string.gmatch(tostring(folder), "[^/\\]+") do
+				cur = cur == "" and part or (cur .. "/" .. part)
+				local ok, exists = pcall(isfolder, cur)
+				if not (ok and exists) then pcall(makefolder, cur) end
+			end
+		end
+		pcall(writefile, savePath, tostring(key) .. "\n" .. tostring(math.floor(tonumber(activated) or Now())))
+	end
+	function B.Load()
+		if ks.SaveKey == false or not (isfile and readfile) then return nil end
+		local ok, exists = pcall(isfile, savePath)
+		if not (ok and exists) then return nil end
+		local ok2, data = pcall(readfile, savePath)
+		if not (ok2 and type(data) == "string") then return nil end
+		local key, activated = data:match("^([^\n]*)\n?(%d*)")
+		if not key or key == "" then return nil end
+		return key, tonumber(activated)
+	end
+	function B.Forget()
+		if delfile then pcall(delfile, savePath) end
+	end
+	return B
+end
+
+-- Blocks the calling thread until a key passes verification.
+-- Returns true, {Key, Expires, Activated}, or false if the user closes it.
+local function RunKeySystem(ks, ctx)
+	if type(ks) ~= "table" then ks = {} end
+	if ks.Enabled == false then return true, {} end
+	ctx = ctx or {}
+	local theme = Library.Themes[ctx.Theme or ""] or Library.Themes.Dark
+	local K = {
+		Theme = theme,
+		Accent = ToColor(ctx.Accent) or rgb(255, 89, 89),
+		AccentAlpha = ToAlpha(ctx.AccentAlpha) or 1,
+	}
+	function K.Bind(fn) fn(K.Theme, K.Accent, K.AccentAlpha) end
+
+	local B = ctx.Backend or KeyBackend(ks, ctx)
+
+	local parent = ctx.Parent
+	if not parent then
+		local ok, hui = pcall(function() return gethui and gethui() end)
+		parent = (ok and hui) or LocalPlayer:WaitForChild("PlayerGui")
+	end
+	local guiName = (ctx.GuiName or Library.GuiName) .. "_Key"
+	local old = parent:FindFirstChild(guiName)
+	if old then old:Destroy() end
+	local gui = Create("ScreenGui", {
+		Name = guiName,
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = (ctx.DisplayOrder or 100) + 1,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		Parent = parent,
+	})
+	if ctx.OnGui then SafeCall(ctx.OnGui, gui) end
+
+	local T, KW, KH = theme, 300, 186
+	local holder = Create("Frame", {
+		Size = UDim2.fromOffset(KW, KH),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Parent = gui,
+	})
+	Create("UIScale", {Scale = math.clamp(tonumber(ks.Scale or ctx.Scale) or 1, 0.3, 3), Parent = holder})
+	local main = Create("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = T.WindowBg, BorderSizePixel = 0, Active = true, Parent = holder})
+	Corner(main, 6)
+	Stroke(main, T.BoxBorder, 1)
+
+	local header = Create("Frame", {Size = UDim2.new(1, 0, 0, HEADER_H), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = main})
+	Corner(header, 6)
+	local hfill = Create("Frame", {Size = UDim2.new(1, 0, 0, HEADER_H / 2), Position = UDim2.fromOffset(0, HEADER_H / 2), BackgroundColor3 = WHITE, BorderSizePixel = 0, Parent = header})
+	local seq = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, T.BarBg:Lerp(K.Accent, 0.07 * K.AccentAlpha)),
+		ColorSequenceKeypoint.new(0.16, T.BarBg),
+		ColorSequenceKeypoint.new(1, T.BarBg),
+	})
+	Create("UIGradient", {Color = seq, Parent = header})
+	Create("UIGradient", {Color = seq, Parent = hfill})
+	Create("Frame", {Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BackgroundColor3 = T.BarLine, BorderSizePixel = 0, Parent = header})
+
+	local brand = Create("Frame", {Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Position = UDim2.fromOffset(9, 0), BackgroundTransparency = 1, Parent = header})
+	Create("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		Padding = UDim.new(0, 5),
+		Parent = brand,
+	})
+	local title = ks.Title or ctx.Title or "Zenin"
+	local logo = CreateLogo(K, brand, NormalizeLogo(ks.Logo or ctx.Logo, title), 12, 15)
+	logo.LayoutOrder = 1
+	local titleLbl = Label(brand, title, {AutoX = true, Size = UDim2.new(0, 0, 1, 0), Weight = "SemiBold", Color = T.Text})
+	titleLbl.LayoutOrder = 2
+	local sub = Label(header, ks.Subtitle or "Key System", {
+		Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, -40, 1, 0),
+		Align = Enum.TextXAlignment.Right, TextSize = 10, Color = T.TextDim,
+	})
+	sub.ZIndex = 1
+
+	local closeBtn = Create("TextButton", {
+		Size = UDim2.fromOffset(24, 24),
+		Position = UDim2.new(1, -30, 0.5, -12),
+		BackgroundTransparency = 1,
+		Text = "",
+		AutoButtonColor = false,
+		Visible = ks.CanClose ~= false,
+		Parent = header,
+	})
+	local closeIc = CreateIcon(closeBtn, {"x"}, 12, UDim2.new(0.5, -6, 0.5, -6), T.NavGray)
+	closeBtn.MouseEnter:Connect(function() closeIc.ImageColor3 = T.Text end)
+	closeBtn.MouseLeave:Connect(function() closeIc.ImageColor3 = T.NavGray end)
+	if ks.CanClose == false then sub.Size = UDim2.new(1, -12, 1, 0) end
+
+	local body = Create("Frame", {Size = UDim2.new(1, -24, 1, -HEADER_H - 12), Position = UDim2.fromOffset(12, HEADER_H + 10), BackgroundTransparency = 1, Parent = main})
+	local note = Label(body, ks.Note or ks.Description or "Enter your key to continue.", {Size = UDim2.new(1, 0, 0, 14), Color = T.TextGray, Truncate = true})
+
+	local boxFrame = Create("Frame", {Size = UDim2.new(1, 0, 0, 27), Position = UDim2.fromOffset(0, 22), BackgroundColor3 = T.DropdownBg, BorderSizePixel = 0, Parent = body})
+	Corner(boxFrame, 3)
+	local boxStroke = Stroke(boxFrame, T.DropdownBorder, 1)
+	CreateIcon(boxFrame, {"key-round", "key"}, 12, UDim2.new(0, 9, 0.5, -6), T.TextDim)
+	local box = Create("TextBox", {
+		Size = UDim2.new(1, -36, 1, 0),
+		Position = UDim2.fromOffset(28, 0),
+		BackgroundTransparency = 1,
+		Text = "",
+		PlaceholderText = ks.Placeholder or "Paste your key here",
+		PlaceholderColor3 = T.TextDim,
+		TextColor3 = T.Text,
+		ClearTextOnFocus = false,
+		ClipsDescendants = true,
+		TextSize = TEXT,
+		Weight = "Medium",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = boxFrame,
+	})
+	box.Focused:Connect(function()
+		boxStroke.Color = K.Accent
+		boxStroke.Transparency = 1 - K.AccentAlpha
+	end)
+	box.FocusLost:Connect(function()
+		boxStroke.Color = T.DropdownBorder
+		boxStroke.Transparency = 0
+	end)
+
+	local link = ks.GetKeyLink or ks.Link or ks.KeyLink
+	local btnRow = Create("Frame", {Size = UDim2.new(1, 0, 0, 27), Position = UDim2.fromOffset(0, 57), BackgroundTransparency = 1, Parent = body})
+	local function KeyButton(text, icon, primary, x, w)
+		local b = Create("TextButton", {
+			Size = UDim2.new(w, x == 0 and -3 or -3, 1, 0),
+			Position = UDim2.new(x, x == 0 and 0 or 3, 0, 0),
+			BorderSizePixel = 0,
+			Text = "",
+			AutoButtonColor = false,
+			Parent = btnRow,
+		})
+		Corner(b, 3)
+		local st = Stroke(b, T.DropdownBorder, 1)
+		local content = Create("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.new(0, 0, 0, 16), AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundTransparency = 1, Parent = b,
+		})
+		Create("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5), Parent = content,
+		})
+		local ic = CreateIcon(content, icon, 12, nil)
+		ic.LayoutOrder = 1
+		local lb = Label(content, text, {AutoX = true, Size = UDim2.new(0, 0, 1, 0)})
+		lb.LayoutOrder = 2
+		local hover, disabled = false, false
+		local function Paint()
+			b.BackgroundColor3 = (hover and not disabled) and T.TileHover or T.DropdownBg
+			if primary and not disabled then
+				st.Color, st.Transparency = K.Accent, 1 - K.AccentAlpha
+			else
+				st.Color, st.Transparency = T.DropdownBorder, 0
+			end
+			lb.TextColor3 = disabled and T.TextDim or ((hover or primary) and T.Text or T.TextGray)
+			ic.ImageColor3 = (primary and not disabled) and K.Accent or lb.TextColor3
+		end
+		Paint()
+		b.MouseEnter:Connect(function() hover = true Paint() end)
+		b.MouseLeave:Connect(function() hover = false Paint() end)
+		return b, lb, function(d) disabled = d Paint() end
+	end
+	local verifyBtn, verifyLbl, setVerifyDisabled
+	local getBtn
+	if link then
+		getBtn = KeyButton(ks.GetKeyText or "Get Key", {"link", "external-link"}, false, 0, 0.5)
+		verifyBtn, verifyLbl, setVerifyDisabled = KeyButton(ks.VerifyText or "Verify", {"shield-check", "check"}, true, 0.5, 0.5)
+	else
+		verifyBtn, verifyLbl, setVerifyDisabled = KeyButton(ks.VerifyText or "Verify", {"shield-check", "check"}, true, 0, 1)
+		verifyBtn.Size = UDim2.fromScale(1, 1)
+	end
+
+	local status = Label(body, "", {Size = UDim2.new(1, 0, 0, 14), Position = UDim2.fromOffset(0, 92), TextSize = 10, Color = T.TextDim, Truncate = true})
+	local ERR, OK = rgb(235, 87, 87), rgb(88, 200, 120)
+	local function Status(text, kind)
+		status.Text = tostring(text or "")
+		status.TextColor3 = kind == "error" and ERR or (kind == "ok" and OK or T.TextDim)
+	end
+
+	local thread = coroutine.running()
+	local finished, busy = false, false
+	local attempts, lockedUntil = 0, 0
+	local maxAttempts = tonumber(ks.MaxAttempts)
+	local lockTime = tonumber(ks.Cooldown) or 30
+
+	local function Finish(result, info)
+		if finished then return end
+		finished = true
+		Tween(holder, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {Position = UDim2.new(0.5, 0, 0.5, 12)})
+		task.delay(0.12, function() gui:Destroy() end)
+		if result then SafeCall(ks.OnSuccess or ks.Callback, info.Key, info) else SafeCall(ks.OnClose) end
+		task.spawn(thread, result, info)
+	end
+
+	local function Attempt(key, fromSave, activated)
+		if busy or finished then return end
+		key = tostring(key or ""):gsub("^%s+", ""):gsub("%s+$", "")
+		local now = os.clock()
+		if now < lockedUntil then
+			Status(("Too many attempts. Wait %ds"):format(math.ceil(lockedUntil - now)), "error")
+			return
+		end
+		busy = true
+		setVerifyDisabled(true)
+		verifyLbl.Text = "Checking..."
+		Status(fromSave and "Checking saved key..." or "Verifying...")
+		activated = math.floor(tonumber(activated) or Now())
+		task.spawn(function()
+			local valid, msg, exp, definitive = B.Check(key, activated)
+			busy = false
+			if finished or not gui.Parent then return end
+			setVerifyDisabled(false)
+			verifyLbl.Text = ks.VerifyText or "Verify"
+			if valid then
+				Status(exp and ("Key accepted · expires in " .. FormatDuration(exp - Now())) or "Key accepted", "ok")
+				B.Save(key, activated)
+				task.delay(0.35, function() Finish(true, {Key = key, Expires = exp, Activated = activated}) end)
+				return
+			end
+			if fromSave then
+				if definitive then
+					B.Forget()
+					box.Text = ""
+					Status(msg == "Key expired" and "Saved key expired. Enter a new key" or "Saved key is no longer valid", "error")
+				else
+					Status(msg or "Could not verify saved key", "error")
+				end
+				return
+			end
+			attempts = attempts + 1
+			SafeCall(ks.OnFail, key, msg)
+			if maxAttempts and attempts >= maxAttempts then
+				attempts = 0
+				lockedUntil = os.clock() + lockTime
+				Status(("Too many attempts. Wait %ds"):format(math.ceil(lockTime)), "error")
+			else
+				Status(msg or "Invalid key", "error")
+			end
+		end)
+	end
+
+	verifyBtn.MouseButton1Click:Connect(function() Attempt(box.Text) end)
+	box.FocusLost:Connect(function(enter) if enter then Attempt(box.Text) end end)
+	closeBtn.MouseButton1Click:Connect(function()
+		if ks.CanClose ~= false then Finish(false) end
+	end)
+	if getBtn then
+		getBtn.MouseButton1Click:Connect(function()
+			local clip = setclipboard or toclipboard or (Clipboard and Clipboard.set)
+			if clip and pcall(clip, tostring(link)) then
+				Status("Key link copied to clipboard", "ok")
+			else
+				Status(tostring(link))
+			end
+			SafeCall(ks.OnGetKey, link)
+		end)
+	end
+
+	holder.Position = UDim2.new(0.5, 0, 0.5, 12)
+	Tween(holder, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = UDim2.fromScale(0.5, 0.5)})
+
+	if ctx.Reason then Status(ctx.Reason, "error") end
+	local saved, savedAt
+	if not ctx.SkipSaved then saved, savedAt = B.Load() end
+	if saved then
+		box.Text = saved
+		Attempt(saved, true, savedAt)
+	end
+	return coroutine.yield()
+end
+
 local function CreateWindow(o)
 	o = Opts(o)
 	if o.Name and not o.Title then o.Title = o.Name end
+	-- Runs before any window or API exists, so nothing below is reachable until a key passes.
+	local keyCfg, keyCtx, keyInfo
+	if o.KeySystem and o.KeySystem ~= false then
+		keyCfg = o.KeySystem == true and {} or o.KeySystem
+		keyCtx = {
+			Theme = o.Theme, Accent = o.Accent, AccentAlpha = o.AccentAlpha,
+			Title = o.Title, Logo = o.Logo or o.Icon, Parent = o.Parent, GuiName = o.GuiName,
+			DisplayOrder = o.DisplayOrder, Folder = o.ConfigFolder or Library.ConfigFolder,
+		}
+		if keyCfg.Enabled ~= false then keyCtx.Backend = KeyBackend(keyCfg, keyCtx) end
+		local ok, info = RunKeySystem(keyCfg, keyCtx)
+		if not ok then error("[Zenin] key verification was not completed", 0) end
+		keyInfo = info
+	end
 	if Library.ActiveWindow then pcall(Library.ActiveWindow.Destroy) end
 
 	local themeName = Library.Themes[o.Theme or ""] and o.Theme or "Dark"
@@ -3393,13 +5073,13 @@ local function CreateWindow(o)
 		Title = o.Title or "Zenin",
 		ThemeName = themeName,
 		Theme = Library.Themes[themeName],
-		Accent = o.Accent or rgb(255, 89, 89),
-		AccentAlpha = o.AccentAlpha or 1,
+		Accent = ToColor(o.Accent) or rgb(255, 89, 89),
+		AccentAlpha = ToAlpha(o.AccentAlpha) or 1,
 		Listeners = {}, Conns = {}, Popups = {}, LogoHooks = {},
 		Pages = {}, Tabs = {}, Elements = {}, HeaderButtons = {}, AccentIcons = {}, UnloadCallbacks = {},
 		BarW = math.clamp(math.floor(tonumber(o.ScrollbarSize) or 6), 3, 24),
 		WheelScroll = o.MouseWheel == true,
-		ToggleKey = o.ToggleKey or o.Keybind or Enum.KeyCode.RightShift,
+		ToggleKey = ParseKey(o.ToggleKey or o.Keybind) or Enum.KeyCode.RightShift,
 		Nav = {main = "settings"},
 		NotifyOrder = 0,
 		ConfigFolder = o.ConfigFolder or Library.ConfigFolder,
@@ -3419,6 +5099,7 @@ local function CreateWindow(o)
 		W.Listeners = alive
 	end
 	function W.Refresh()
+		if not W.Alive then return end
 		W.Prune()
 		for _, e in ipairs(W.Listeners) do
 			local ok, err = pcall(e.fn, W.Theme, W.Accent, W.AccentAlpha)
@@ -3536,9 +5217,17 @@ local function CreateWindow(o)
 		W.PopupLayer.Visible = true
 	end
 	function W.SetAccent(c, alpha)
-		if typeof(c) == "Color3" then W.Accent = c end
-		if alpha then W.AccentAlpha = math.clamp(alpha, 0, 1) end
-		W.Refresh()
+		if not W.Alive then return end
+		c, alpha = ToColor(c), ToAlpha(alpha)
+		local changed = false
+		if c and c ~= W.Accent then W.Accent, changed = c, true end
+		if alpha and alpha ~= W.AccentAlpha then W.AccentAlpha, changed = alpha, true end
+		if changed then W.Refresh() end
+	end
+	-- For changes coming from outside the accent modal: an open modal would hold stale HSV and overwrite them.
+	function W.SetAccentExternal(c, alpha)
+		if W.AccentPickerEl then W.ClosePopupOf(W.AccentPickerEl) end
+		W.SetAccent(c, alpha)
 	end
 	function W.SetTheme(name)
 		local t = Library.Themes[name]
@@ -3550,6 +5239,9 @@ local function CreateWindow(o)
 	end
 	function W.SetScale(s, animate)
 		s = math.clamp(tonumber(s) or 1, 0.3, 3)
+		W.UserScale = s
+		-- The open/close animation drives W.Scale; it lands on UserScale when it finishes.
+		if W.Animating then return end
 		if animate then
 			Tween(W.Scale, TweenInfo.new(0.18), {Scale = s})
 		else
@@ -3582,14 +5274,97 @@ local function CreateWindow(o)
 	})
 
 	W.WatermarkApi = BuildWatermark(W, o.Watermark)
+	W.KeybindListApi = BuildKeybindList(W, o.KeybindList)
 	BuildShell(W)
 	BuildNavigation(W)
+
+	W.UserScale = W.Scale.Scale
+	W.Visible = true
+	W.Animate = o.Animation ~= false and o.Animations ~= false
+	-- CanvasGroup is only used while animating (wrapping Main) so the window can fade as one layer.
+	local okFader, Fader = pcall(Create, "CanvasGroup", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = W.Holder,
+	})
+	if not okFader then Fader = nil end
+	local OPEN_TI = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	local CLOSE_TI = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	local CLOSED_SCALE = 0.94
+	local animToken = 0
+	local function Unwrap()
+		if Fader and W.Main.Parent == Fader then
+			W.Main.Parent = W.Holder
+		end
+		if Fader then
+			Fader.Visible = false
+			Fader.GroupTransparency = 0
+		end
+	end
+	-- Returns every user element to its default, firing callbacks so script features switch off.
+	function W.ResetElements()
+		W.ClosePopup()
+		W.CancelDrag()
+		W.PendingFlags = nil
+		for _, el in ipairs(CopyList(W.Elements)) do
+			local f = el.Flag
+			if not (f and f:sub(1, 7) == "__Zenin") then
+				if el._reset then
+					SafeCall(el._reset)
+				elseif el._default ~= nil then
+					ApplyFlag(el, el._default)
+				end
+			end
+		end
+	end
+
+	function W.SetShown(show, instant)
+		if not W.Alive then return end
+		show = show ~= false
+		if show and W.KeyLocked then return end
+		W.Visible = show
+		animToken = animToken + 1
+		local token = animToken
+		if not show then
+			W.ClosePopup()
+			W.CancelDrag()
+		end
+		StopTweens(W.Scale, Fader)
+		if instant or not W.Animate or (not show and not W.Holder.Visible) then
+			W.Animating = false
+			Unwrap()
+			W.Scale.Scale = W.UserScale
+			W.Holder.Visible = show
+			return
+		end
+		local fresh = not W.Holder.Visible
+		W.Animating = true
+		W.Holder.Visible = true
+		if Fader and W.Main.Parent ~= Fader then
+			Fader.GroupTransparency = fresh and 1 or 0
+			Fader.Visible = true
+			W.Main.Parent = Fader
+		end
+		if fresh then W.Scale.Scale = W.UserScale * CLOSED_SCALE end
+		local ti = show and OPEN_TI or CLOSE_TI
+		local t = Tween(W.Scale, ti, {Scale = W.UserScale * (show and 1 or CLOSED_SCALE)})
+		if Fader then Tween(Fader, ti, {GroupTransparency = show and 0 or 1}) end
+		t.Completed:Connect(function()
+			if token ~= animToken or not W.Alive then return end
+			W.Animating = false
+			if not show then W.Holder.Visible = false end
+			Unwrap()
+			W.Scale.Scale = W.UserScale
+		end)
+	end
 	local settingsApi = BuildSettings(W, o)
 	if o.Scale then W.SetScale(o.Scale) end
 	W.RefreshNav(true)
 
 	W.Connect(UserInputService.InputBegan, function(input, gp)
-		if not gp and W.ToggleKey and input.KeyCode == W.ToggleKey then
+		if W.Capturing or W.LastCaptured == input then return end
+		if not gp and KeyMatches(W.ToggleKey, input) then
 			W.Window.Toggle()
 		end
 	end)
@@ -3597,6 +5372,7 @@ local function CreateWindow(o)
 	local Window = {Library = Library, Settings = settingsApi}
 	W.Window = Window
 	Window.Watermark = W.WatermarkApi
+	Window.KeybindList = W.KeybindListApi
 
 	Method(Window, "AddTab", function(x) return AddTab(W, x) end)
 	Window.Tab = Window.AddTab
@@ -3622,25 +5398,23 @@ local function CreateWindow(o)
 	Method(Window, "SetTheme", function(name) return W.SetTheme(name) end)
 	Method(Window, "GetTheme", function() return W.ThemeName end)
 	Method(Window, "GetThemes", function() return CopyList(Library.ThemeOrder) end)
-	Method(Window, "SetAccent", function(c, a) W.SetAccent(c, a) end)
+	Method(Window, "SetAccent", function(c, a) W.SetAccentExternal(c, a) end)
 	Method(Window, "GetAccent", function() return W.Accent, W.AccentAlpha end)
 	Method(Window, "SetScale", function(s, animate) W.SetScale(s, animate) end)
-	Method(Window, "GetScale", function() return W.Scale.Scale end)
+	Method(Window, "GetScale", function() return W.UserScale end)
 	Method(Window, "SetScrollbarSize", function(px) W.ScrollSlider.Set(px) end)
 	Method(Window, "SetMouseWheel", function(b)
 		W.WheelScroll = b == true
 		for _, p in ipairs(W.Pages) do p.scroll.ScrollingEnabled = W.WheelScroll end
 	end)
 
-	Method(Window, "SetVisible", function(b)
-		W.Holder.Visible = b ~= false
-		if not W.Holder.Visible then W.ClosePopup() end
-	end)
-	Method(Window, "Show", function() Window.SetVisible(true) end)
-	Method(Window, "Hide", function() Window.SetVisible(false) end)
-	Method(Window, "Toggle", function() Window.SetVisible(not W.Holder.Visible) end)
-	Method(Window, "IsVisible", function() return W.Holder.Visible end)
-	Method(Window, "SetToggleKey", function(k) W.ToggleKey = k end)
+	Method(Window, "SetVisible", function(b, instant) W.SetShown(b ~= false, instant) end)
+	Method(Window, "Show", function(instant) W.SetShown(true, instant) end)
+	Method(Window, "Hide", function(instant) W.SetShown(false, instant) end)
+	Method(Window, "Toggle", function(instant) W.SetShown(not W.Visible, instant) end)
+	Method(Window, "IsVisible", function() return W.Visible end)
+	Method(Window, "SetAnimation", function(b) W.Animate = b ~= false end)
+	Method(Window, "SetToggleKey", function(k) W.ToggleKey = ParseKey(k) end)
 	Method(Window, "GetToggleKey", function() return W.ToggleKey end)
 	Method(Window, "SetPosition", function(p) W.Holder.Position = p end)
 	Method(Window, "Center", function()
@@ -3717,6 +5491,7 @@ local function CreateWindow(o)
 	Method(Window, "Destroy", function()
 		if not W.Alive then return end
 		W.Alive = false
+		if W.KeyGui then pcall(function() W.KeyGui:Destroy() end) end
 		W.ClosePopup()
 		W.CancelDrag()
 		for _, p in ipairs(W.Pages) do p.StopScroll() end
@@ -3747,11 +5522,149 @@ local function CreateWindow(o)
 	table.insert(ThemeHooks, W.ThemeHook)
 	if o.Configs then Window.EnableConfigs(type(o.Configs) == "table" and o.Configs or nil) end
 
+	local KS = keyInfo and keyInfo.Key and {Key = keyInfo.Key, Expires = keyInfo.Expires, Activated = keyInfo.Activated, Valid = true}
+	local expireHooks = {}
+	Method(Window, "IsKeyValid", function() return KS == nil or KS.Valid end)
+	Method(Window, "GetKeyInfo", function()
+		if not KS then return nil end
+		return {
+			Key = KS.Key, Valid = KS.Valid, Expires = KS.Expires,
+			Remaining = KS.Expires and math.max(0, KS.Expires - Now()) or nil,
+		}
+	end)
+	Method(Window, "OnKeyExpired", function(fn) table.insert(expireHooks, fn) end)
+	Method(Window, "CheckKey", function() end)
+	Method(Window, "ExpireKey", function() end)
+	if KS then
+		local backend = keyCtx.Backend
+		local interval = keyCfg.CheckInterval
+		if interval == nil then interval = (keyCfg.Url or keyCfg.Verify) and 60 or false end
+		interval = interval and math.max(tonumber(interval) or 60, 5)
+		local lastCheck, checking, warned = os.clock(), false, {}
+		local WARN_AT = {300, 60}
+
+		-- Locks the menu and asks for a new key; closing that prompt unloads the window.
+		local function Expire(reason)
+			if not W.Alive or not KS.Valid then return end
+			KS.Valid = false
+			W.KeyLocked = true
+			reason = reason or "Your key has expired"
+			backend.Forget()
+			W.SetShown(false)
+			if keyCfg.ResetOnExpire ~= false then W.ResetElements() end
+			W.WM.ApplyLock()
+			if W.KBList then W.KBList.Refresh() end
+			SafeCall(keyCfg.OnExpire, reason)
+			for _, fn in ipairs(expireHooks) do SafeCall(fn, reason) end
+			task.spawn(function()
+				local ctx2 = setmetatable({
+					Reason = reason,
+					SkipSaved = true,
+					Theme = W.ThemeName, Accent = W.Accent, AccentAlpha = W.AccentAlpha,
+					OnGui = function(g) W.KeyGui = g end,
+				}, {__index = keyCtx})
+				local ok, info = RunKeySystem(keyCfg, ctx2)
+				W.KeyGui = nil
+				if not W.Alive then return end
+				if not ok then
+					Window.Destroy()
+					return
+				end
+				KS.Key, KS.Expires, KS.Activated, KS.Valid = info.Key, info.Expires, info.Activated, true
+				table.clear(warned)
+				lastCheck = os.clock()
+				W.KeyLocked = false
+				W.WM.ApplyLock()
+				if W.KBList then W.KBList.Refresh() end
+				W.SetShown(true)
+				Window.Notify({Title = "Key", Content = "Key accepted", Icon = {"key-round", "key"}})
+			end)
+		end
+		local function Recheck()
+			if checking or not KS.Valid then return end
+			checking = true
+			local key = KS.Key
+			task.spawn(function()
+				local valid, msg, exp, definitive = backend.Check(key, KS.Activated)
+				checking = false
+				lastCheck = os.clock()
+				if not W.Alive or not KS.Valid or KS.Key ~= key then return end
+				if valid then
+					KS.Expires = exp
+				elseif definitive or keyCfg.StrictOnline then
+					Expire(msg == "Key expired" and "Your key has expired" or (msg or "Your key is no longer valid"))
+				end
+			end)
+		end
+		Method(Window, "CheckKey", Recheck)
+		Method(Window, "ExpireKey", function(reason) Expire(reason) end)
+
+		local keyLbl
+		if keyCfg.ShowInSettings ~= false then
+			local keySec = settingsApi.AddSection({Name = "Key", Side = "Right"})
+			keyLbl = keySec.AddLabel("")
+			keySec.AddButton({Name = "Check Key Now", Callback = function()
+				Recheck()
+				return "Checking..."
+			end})
+		end
+		local function UpdateLabel()
+			if not keyLbl then return end
+			local k = tostring(KS.Key)
+			local masked = (#k > 6 and k:sub(1, 4) or "") .. "••••"
+			local state
+			if not KS.Valid then
+				state = "Expired"
+			elseif KS.Expires then
+				state = "Expires in " .. FormatDuration(KS.Expires - Now())
+			else
+				state = "Never expires"
+			end
+			keyLbl.Set("Key: " .. masked .. "   ·   " .. state)
+		end
+
+		task.spawn(function()
+			while W.Alive do
+				if KS.Valid then
+					local left = KS.Expires and (KS.Expires - Now())
+					if left and left <= 0 then
+						Expire("Your key has expired")
+					else
+						if left and keyCfg.Warn ~= false then
+							local due = false
+							for _, mark in ipairs(WARN_AT) do
+								if left <= mark and not warned[mark] then
+									warned[mark] = true
+									due = true
+								end
+							end
+							if due then
+								Window.Notify({Title = "Key", Content = "Your key expires in " .. FormatDuration(left), Icon = {"key-round", "key"}, Duration = 5})
+							end
+						end
+						if interval and os.clock() - lastCheck >= interval then Recheck() end
+					end
+				end
+				UpdateLabel()
+				task.wait(1)
+			end
+		end)
+	end
+
+	if o.Visible == false then
+		W.SetShown(false, true)
+	else
+		W.Holder.Visible = false
+		W.SetShown(true)
+	end
+
 	Library.ActiveWindow = Window
 	return Window
 end
 
 Method(Library, "CreateWindow", CreateWindow)
+Method(Library, "KeySystem", function(ks) return RunKeySystem(ks, {}) end)
+Library.FormatDuration = FormatDuration
 Library.Window = Library.CreateWindow
 Library.new = Library.CreateWindow
 Method(Library, "Notify", function(o)
