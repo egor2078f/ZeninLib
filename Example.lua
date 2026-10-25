@@ -1,5 +1,5 @@
 -- 1. Load the library
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/whereesd0-star/Zenin/main/ZeninLib.lua"))()
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/egor2078f/ZeninLib/refs/heads/main/ZeninLib.lua"))()
 
 -- 2. Make a window
 local Window = Library:CreateWindow({
