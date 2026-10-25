@@ -1,10 +1,12 @@
+-- 1. Load the library
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/whereesd0-star/Zenin/main/ZeninLib.lua"))()
 
+-- 2. Make a window
 local Window = Library:CreateWindow({
 	Title = "Zenin Roblox",
 	Logo = "Z",
 	ToggleKey = Enum.KeyCode.RightShift,
-	Configs = {Folder = "Zenin/Example", Key = "change me"},
+	Configs = {Folder = "Zenin/Example"}, -- configs are saved in this folder
 	Accent = Color3.fromRGB(255, 89, 89),
 	Watermark = {
 		Title = "zenin",
@@ -13,13 +15,15 @@ local Window = Library:CreateWindow({
 	},
 })
 
+-- 3. Tabs (bottom bar) -> sub-tabs -> sections
 local Combat = Window:AddTab({Name = "Combat", Icon = {"crosshair", "target"}})
 
 local Aimbot = Combat:AddSubTab({Name = "Aimbot", Icon = {"crosshair", "target"}})
 do
+	-- 4. Elements go into sections
 	local main = Aimbot:AddSection({Side = "Left"})
 	local aim = main:AddToggle({Name = "Aimbot", Flag = "Aimbot"})
-	main:AddToggle({Name = "Silent", Flag = "Silent", DependsOn = aim})
+	main:AddToggle({Name = "Silent", Flag = "Silent", DependsOn = aim}) -- works only while "Aimbot" is on
 
 	local target = Aimbot:AddSection({Name = "Target", Side = "Left"})
 	target:AddDropdown({Name = "Bones Group", Options = {"Head", "Neck", "Chest", "Body"}, Default = "Head", Flag = "Bones"})
@@ -68,6 +72,7 @@ do
 	local weapon = players:AddSection({Name = "Weapon", Side = "Right"})
 	weapon:AddDropdown({Name = "Display", Options = {"None", "Name", "Icon"}, Flag = "WeaponDisplay"})
 	local font = weapon:AddDropdown({Name = "Font", Options = {"Smallest", "Default", "Bold"}, Flag = "WeaponFont"})
+	-- small gear next to the dropdown with extra settings
 	local fontSettings = font:AddSettings({Title = "Font Settings"})
 	fontSettings:AddSlider({Name = "Size", Min = 6, Max = 20, Default = 10, Suffix = "px", Flag = "WeaponFontSize"})
 	weapon:AddToggle({Name = "Glow", Flag = "WeaponGlow"})
@@ -81,6 +86,7 @@ end
 Window:AddTab({Name = "Misc", Icon = {"sliders-horizontal", "sliders"}})
 Window:AddTab({Name = "Skins", Icon = "shirt"})
 
+-- your own box on the settings page
 local info = Window.Settings:AddSection({Name = "Information", Side = "Right"})
 info:AddButton({
 	Name = "Telegram",

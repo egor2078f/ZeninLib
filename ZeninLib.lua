@@ -337,213 +337,6 @@ local function FromHex(hex)
 	return Color3.fromRGB(r, g, b)
 end
 
-local Crypto = {}
-do
-	local band, bor, bxor, bnot = bit32.band, bit32.bor, bit32.bxor, bit32.bnot
-	local rrotate, lrotate, rshift, lshift = bit32.rrotate, bit32.lrotate, bit32.rshift, bit32.lshift
-	local byte, char, concat = string.byte, string.char, table.concat
-	local M = 0xffffffff
-
-	local K = {
-		0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-		0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-		0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-		0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-		0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-		0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-		0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-		0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-	}
-
-	local function U32BE(n)
-		return char(band(rshift(n, 24), 255), band(rshift(n, 16), 255), band(rshift(n, 8), 255), band(n, 255))
-	end
-
-	function Crypto.Sha256(msg)
-		local len = #msg
-		local bits = len * 8
-		msg = msg .. "\128" .. string.rep("\0", (55 - len) % 64) .. U32BE(math.floor(bits / 4294967296)) .. U32BE(bits % 4294967296)
-		local H1, H2, H3, H4 = 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a
-		local H5, H6, H7, H8 = 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-		local w = {}
-		for chunk = 1, #msg, 64 do
-			for i = 0, 15 do
-				local a, b, c, d = byte(msg, chunk + i * 4, chunk + i * 4 + 3)
-				w[i] = bor(lshift(a, 24), lshift(b, 16), lshift(c, 8), d)
-			end
-			for i = 16, 63 do
-				local v15, v2 = w[i - 15], w[i - 2]
-				local s0 = bxor(rrotate(v15, 7), rrotate(v15, 18), rshift(v15, 3))
-				local s1 = bxor(rrotate(v2, 17), rrotate(v2, 19), rshift(v2, 10))
-				w[i] = band(w[i - 16] + s0 + w[i - 7] + s1, M)
-			end
-			local a, b, c, d, e, f, g, h = H1, H2, H3, H4, H5, H6, H7, H8
-			for i = 0, 63 do
-				local s1 = bxor(rrotate(e, 6), rrotate(e, 11), rrotate(e, 25))
-				local ch = bxor(band(e, f), band(bnot(e), g))
-				local t1 = h + s1 + ch + K[i + 1] + w[i]
-				local s0 = bxor(rrotate(a, 2), rrotate(a, 13), rrotate(a, 22))
-				local maj = bxor(band(a, b), band(a, c), band(b, c))
-				h, g, f, e, d, c, b, a = g, f, e, band(d + t1, M), c, b, a, band(t1 + s0 + maj, M)
-			end
-			H1, H2, H3, H4 = band(H1 + a, M), band(H2 + b, M), band(H3 + c, M), band(H4 + d, M)
-			H5, H6, H7, H8 = band(H5 + e, M), band(H6 + f, M), band(H7 + g, M), band(H8 + h, M)
-		end
-		return U32BE(H1) .. U32BE(H2) .. U32BE(H3) .. U32BE(H4) .. U32BE(H5) .. U32BE(H6) .. U32BE(H7) .. U32BE(H8)
-	end
-
-	local function Xor(a, b)
-		local out = table.create(#a)
-		for i = 1, #a do out[i] = char(bxor(byte(a, i), byte(b, i))) end
-		return concat(out)
-	end
-
-	function Crypto.HmacKey(key)
-		if #key > 64 then key = Crypto.Sha256(key) end
-		key = key .. string.rep("\0", 64 - #key)
-		local ipad, opad = Xor(key, string.rep("\54", 64)), Xor(key, string.rep("\92", 64))
-		return function(msg)
-			return Crypto.Sha256(opad .. Crypto.Sha256(ipad .. msg))
-		end
-	end
-
-	function Crypto.Hmac(key, msg)
-		return Crypto.HmacKey(key)(msg)
-	end
-
-	function Crypto.Pbkdf2(pass, salt, iterations, length)
-		local prf = Crypto.HmacKey(pass)
-		local out = {}
-		for block = 1, math.ceil(length / 32) do
-			local u = prf(salt .. U32BE(block))
-			local t = {byte(u, 1, 32)}
-			for _ = 2, iterations do
-				u = prf(u)
-				for i = 1, 32 do t[i] = bxor(t[i], byte(u, i)) end
-			end
-			out[block] = char(table.unpack(t))
-		end
-		return concat(out):sub(1, length)
-	end
-
-	local function LE32(s, i)
-		local a, b, c, d = byte(s, i, i + 3)
-		return a + b * 256 + c * 65536 + d * 16777216
-	end
-
-	local function QR(x, a, b, c, d)
-		x[a] = band(x[a] + x[b], M) x[d] = lrotate(bxor(x[d], x[a]), 16)
-		x[c] = band(x[c] + x[d], M) x[b] = lrotate(bxor(x[b], x[c]), 12)
-		x[a] = band(x[a] + x[b], M) x[d] = lrotate(bxor(x[d], x[a]), 8)
-		x[c] = band(x[c] + x[d], M) x[b] = lrotate(bxor(x[b], x[c]), 7)
-	end
-
-	function Crypto.ChaCha20(key, nonce, counter, data)
-		local init = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}
-		for i = 0, 7 do init[5 + i] = LE32(key, i * 4 + 1) end
-		init[13] = counter
-		for i = 0, 2 do init[14 + i] = LE32(nonce, i * 4 + 1) end
-		local out, x, ks = {}, {}, {}
-		for pos = 1, #data, 64 do
-			for i = 1, 16 do x[i] = init[i] end
-			for _ = 1, 10 do
-				QR(x, 1, 5, 9, 13) QR(x, 2, 6, 10, 14) QR(x, 3, 7, 11, 15) QR(x, 4, 8, 12, 16)
-				QR(x, 1, 6, 11, 16) QR(x, 2, 7, 12, 13) QR(x, 3, 8, 9, 14) QR(x, 4, 5, 10, 15)
-			end
-			for i = 1, 16 do
-				local v = band(x[i] + init[i], M)
-				local j = (i - 1) * 4
-				ks[j + 1], ks[j + 2], ks[j + 3], ks[j + 4] = band(v, 255), band(rshift(v, 8), 255), band(rshift(v, 16), 255), rshift(v, 24)
-			end
-			for j = 0, math.min(63, #data - pos) do
-				out[#out + 1] = char(bxor(byte(data, pos + j), ks[j + 1]))
-			end
-			init[13] = band(init[13] + 1, M)
-		end
-		return concat(out)
-	end
-
-	local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	local B64R = {}
-	for i = 1, 64 do B64R[byte(B64, i)] = i - 1 end
-
-	function Crypto.Base64(s)
-		local out = {}
-		for i = 1, #s, 3 do
-			local a, b, c = byte(s, i, i + 2)
-			local n = a * 65536 + (b or 0) * 256 + (c or 0)
-			local c1, c2 = rshift(n, 18) + 1, band(rshift(n, 12), 63) + 1
-			local c3, c4 = band(rshift(n, 6), 63) + 1, band(n, 63) + 1
-			out[#out + 1] = B64:sub(c1, c1) .. B64:sub(c2, c2)
-				.. (b and B64:sub(c3, c3) or "=") .. (c and B64:sub(c4, c4) or "=")
-		end
-		return concat(out)
-	end
-
-	function Crypto.Unbase64(s)
-		s = (string.gsub(s, "[^%w%+/=]", ""))
-		if #s % 4 ~= 0 then return nil end
-		local out = {}
-		for i = 1, #s, 4 do
-			local a, b, c, d = byte(s, i, i + 3)
-			local va, vb, vc, vd = B64R[a], B64R[b], B64R[c], B64R[d]
-			if not (va and vb) or (not vc and c ~= 61) or (not vd and d ~= 61) then return nil end
-			local n = va * 262144 + vb * 4096 + (vc or 0) * 64 + (vd or 0)
-			out[#out + 1] = char(rshift(n, 16))
-			if c ~= 61 then out[#out + 1] = char(band(rshift(n, 8), 255)) end
-			if d ~= 61 then out[#out + 1] = char(band(n, 255)) end
-		end
-		return concat(out)
-	end
-
-	local counter = 0
-	function Crypto.RandomBytes(n)
-		local out = ""
-		while #out < n do
-			counter = counter + 1
-			local seed = {tostring(os.clock()), tostring(os.time()), tostring(counter), tostring(math.random())}
-			pcall(function() table.insert(seed, game:GetService("HttpService"):GenerateGUID(false)) end)
-			pcall(function() table.insert(seed, tostring(Random.new():NextNumber())) end)
-			out = out .. Crypto.Sha256(concat(seed, "|"))
-		end
-		return out:sub(1, n)
-	end
-
-	local PREFIX = "ZENC:"
-	local ITERATIONS = 2000
-
-	function Crypto.MasterKey(pass)
-		return Crypto.Pbkdf2(pass, "ZeninLib.Configs", ITERATIONS, 32)
-	end
-
-	function Crypto.IsEncrypted(text)
-		return type(text) == "string" and text:sub(1, #PREFIX) == PREFIX
-	end
-
-	function Crypto.Encrypt(plain, master)
-		local salt, nonce = Crypto.RandomBytes(16), Crypto.RandomBytes(12)
-		local encKey = Crypto.Hmac(master, "enc" .. salt)
-		local macKey = Crypto.Hmac(master, "mac" .. salt)
-		local body = Crypto.ChaCha20(encKey, nonce, 1, plain)
-		local tag = Crypto.Hmac(macKey, salt .. nonce .. body)
-		return PREFIX .. Crypto.Base64(salt .. nonce .. body .. tag)
-	end
-
-	function Crypto.Decrypt(text, master)
-		if not Crypto.IsEncrypted(text) then return nil, "not encrypted" end
-		local raw = Crypto.Unbase64(text:sub(#PREFIX + 1))
-		if not raw or #raw < 60 then return nil, "corrupted" end
-		local salt, nonce = raw:sub(1, 16), raw:sub(17, 28)
-		local body, tag = raw:sub(29, -33), raw:sub(-32)
-		local macKey = Crypto.Hmac(master, "mac" .. salt)
-		local expect = Crypto.Hmac(macKey, salt .. nonce .. body)
-		local diff = 0
-		for i = 1, 32 do diff = bor(diff, bxor(byte(tag, i), byte(expect, i))) end
-		if diff ~= 0 then return nil, "wrong key or corrupted" end
-		return Crypto.ChaCha20(Crypto.Hmac(master, "enc" .. salt), nonce, 1, body)
-	end
-end
-
 
 local function MakeDraggable(W, handle, target, opts)
 	opts = opts or {}
@@ -3096,9 +2889,6 @@ end
 local function BuildConfigManager(W, Window, o)
 	local CFG = {
 		Folder = o.ConfigFolder or Library.ConfigFolder,
-		Encrypt = false,
-		Key = nil,
-		BindToUser = false,
 		Interface = true,
 		Ignore = {},
 		Extra = {},
@@ -3107,7 +2897,6 @@ local function BuildConfigManager(W, Window, o)
 		Active = nil,
 	}
 	local api = {}
-	local masterPass, masterKey
 
 	local function Clean(name)
 		name = tostring(name or "default"):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%.cfg$", "")
@@ -3159,15 +2948,6 @@ local function BuildConfigManager(W, Window, o)
 		local ok, err = pcall(writefile, path, text)
 		if ok then return true end
 		return false, tostring(err)
-	end
-
-	local function MasterKey()
-		local pass = tostring(CFG.Key or "ZeninLib")
-		if CFG.BindToUser and LocalPlayer then pass = pass .. "|" .. tostring(LocalPlayer.UserId) end
-		if pass ~= masterPass then
-			masterPass, masterKey = pass, Crypto.MasterKey(pass)
-		end
-		return masterKey
 	end
 
 	local function Included(flag)
@@ -3230,7 +3010,6 @@ local function BuildConfigManager(W, Window, o)
 	local function Encode(data)
 		local ok, json = pcall(HttpService.JSONEncode, HttpService, data)
 		if not ok then return nil, "encode failed" end
-		if CFG.Encrypt then return Crypto.Encrypt(json, MasterKey()) end
 		return json
 	end
 
@@ -3238,11 +3017,8 @@ local function BuildConfigManager(W, Window, o)
 		if type(text) ~= "string" then return nil, "empty" end
 		text = text:gsub("^%s+", ""):gsub("%s+$", "")
 		if text == "" then return nil, "empty" end
-		if Crypto.IsEncrypted(text) then
-			local plain, err = Crypto.Decrypt(text, MasterKey())
-			if not plain then return nil, err end
-			text = plain
-		end
+		-- Configs saved by old versions with encryption on can't be read anymore.
+		if text:sub(1, 5) == "ZENC:" then return nil, "old encrypted config, save it again" end
 		local ok, data = pcall(HttpService.JSONDecode, HttpService, text)
 		if not ok or type(data) ~= "table" then return nil, "invalid config" end
 		return data
@@ -3251,12 +3027,6 @@ local function BuildConfigManager(W, Window, o)
 	Method(api, "Configure", function(co)
 		co = co or {}
 		if co.Folder ~= nil then CFG.Folder = co.Folder ~= "" and co.Folder or nil end
-		if co.Encrypt ~= nil then CFG.Encrypt = co.Encrypt == true end
-		if co.Key ~= nil then
-			CFG.Key = co.Key
-			if co.Encrypt == nil then CFG.Encrypt = true end
-		end
-		if co.BindToUser ~= nil then CFG.BindToUser = co.BindToUser == true end
 		if co.Interface ~= nil then CFG.Interface = co.Interface ~= false end
 		if type(co.Ignore) == "table" then
 			for _, f in ipairs(co.Ignore) do CFG.Ignore[f] = true end
@@ -3361,33 +3131,6 @@ local function BuildConfigManager(W, Window, o)
 		return base .. "-" .. k
 	end)
 
-	Method(api, "IsEncrypted", function(name)
-		return Crypto.IsEncrypted(ReadFile(Path(name)))
-	end)
-
-	Method(api, "Export", function(name)
-		if name ~= nil then
-			local text = ReadFile(Path(name))
-			if not text then return nil, "not found" end
-			local data, err = Decode(text)
-			if not data then return nil, err end
-			return Encode(data)
-		end
-		return Encode(Snapshot())
-	end)
-
-	Method(api, "Import", function(text, name)
-		local data, err = Decode(text)
-		if not data then return false, err end
-		if name == nil then return Apply(data) end
-		name = Clean(name)
-		local enc, eerr = Encode(data)
-		if not enc then return false, eerr end
-		local ok, werr = WriteFile(Path(name), enc)
-		Refresh()
-		return ok, werr
-	end)
-
 	Method(api, "Get", Snapshot)
 	Method(api, "Apply", function(data)
 		local ok, err = Apply(data)
@@ -3428,10 +3171,6 @@ local function BuildConfigManager(W, Window, o)
 
 	Method(api, "SetFolder", function(folder) api.Configure({Folder = folder or ""}) end)
 	Method(api, "GetFolder", function() return CFG.Folder end)
-	Method(api, "SetEncryption", function(on, key)
-		api.Configure({Encrypt = on ~= false, Key = key})
-	end)
-	Method(api, "IsEncryptionEnabled", function() return CFG.Encrypt end)
 	Method(api, "Ignore", function(...)
 		for _, f in ipairs({...}) do CFG.Ignore[f] = true end
 	end)
@@ -3541,14 +3280,6 @@ local function BuildConfigs(W, Window)
 		return b
 	end
 
-	local function ButtonRow(sec, left, right)
-		local rowFrame = sec._raw(27)
-		local l = Create("Frame", {Size = UDim2.new(0.5, -3, 1, 0), BackgroundTransparency = 1, Parent = rowFrame})
-		local r = Create("Frame", {Size = UDim2.new(0.5, -3, 1, 0), Position = UDim2.new(0.5, 3, 0, 0), BackgroundTransparency = 1, Parent = rowFrame})
-		WideButton(l, left[1], left[2], left[3])
-		WideButton(r, right[1], right[2], right[3])
-	end
-
 	local list = NewSection(W, page, {Name = "Config List"})
 	local activeLbl = Label(list._raw(16), "Active: None", {Truncate = true})
 	W.Paint(activeLbl, "TextColor3", "TextGray")
@@ -3585,43 +3316,22 @@ local function BuildConfigs(W, Window)
 		local row = Create("Frame", {Size = UDim2.new(1, 0, 0, 45), BorderSizePixel = 0, LayoutOrder = i, Parent = holder})
 		Corner(row, 3)
 		W.Paint(row, "BackgroundColor3", "DropdownBg")
-		local title = Label(row, name .. ".cfg", {Position = UDim2.fromOffset(14, 7), Size = UDim2.new(1, -170, 0, 16), Weight = "SemiBold", Truncate = true})
+		local title = Label(row, name .. ".cfg", {Position = UDim2.fromOffset(14, 7), Size = UDim2.new(1, -120, 0, 16), Weight = "SemiBold", Truncate = true})
 		local info = tostring(i)
 		if autoName == name then info = info .. "  ·  autoload" end
-		local idx = Label(row, info, {Position = UDim2.fromOffset(14, 24), Size = UDim2.new(1, -170, 0, 14), TextSize = 10})
+		local idx = Label(row, info, {Position = UDim2.fromOffset(14, 24), Size = UDim2.new(1, -120, 0, 14), TextSize = 10})
 		W.Bind(function(T, accent)
 			title.TextColor3 = (Configs.GetActive() == name) and accent or T.Text
 			idx.TextColor3 = T.TextDim
 		end, row)
 
-		IconButton(row, -148, {"download", "import"}, function()
+		IconButton(row, -92, {"download", "import"}, function()
 			local ok, err = Configs.Load(name)
 			Result(ok, err, "Loaded " .. name .. ".cfg", "Load failed")
 		end)
-		IconButton(row, -120, {"save"}, function()
+		IconButton(row, -64, {"save"}, function()
 			local ok, err = Configs.Save(name)
 			Result(ok, err, "Saved " .. name .. ".cfg", "Save failed")
-		end)
-		IconButton(row, -92, {"star"}, function()
-			if autoName == name then
-				Configs.SetAutoLoad(nil)
-				Note("Autoload disabled")
-			else
-				Configs.SetAutoLoad(name)
-				Note(name .. ".cfg will load automatically")
-			end
-		end, function() return autoName == name end)
-		IconButton(row, -64, {"copy", "clipboard"}, function()
-			local text, err = Configs.Export(name)
-			if not text then
-				Note("Export failed: " .. tostring(err))
-			elseif setclipboard then
-				pcall(setclipboard, text)
-				Note("Copied " .. name .. ".cfg to clipboard")
-			else
-				box.Text = text
-				Note("Clipboard unsupported, config placed in the name field")
-			end
 		end)
 		IconButton(row, -36, {"trash-2", "trash"}, function()
 			local ok, err = Configs.Delete(name)
@@ -3655,30 +3365,17 @@ local function BuildConfigs(W, Window)
 		return text
 	end
 
-	ButtonRow(actions, {"Create New", {"file-plus", "file"}, function()
+	WideButton(actions._raw(27), "Create New", {"file-plus", "file"}, function()
 		local name = BoxName()
 		if name == "" or #name > 64 then name = "config_" .. (#Configs.List() + 1) end
 		name = Configs.UniqueName(name)
 		local ok, err = Configs.Save(name)
 		if ok then box.Text = "" end
 		Result(ok, err, "Created " .. name .. ".cfg", "Create failed")
-	end}, {"Refresh List", {"refresh-cw"}, function()
+	end)
+	WideButton(actions._raw(27), "Refresh List", {"refresh-cw"}, function()
 		Refresh()
-	end})
-	ButtonRow(actions, {"Import", {"clipboard-paste", "clipboard"}, function()
-		local text = BoxName()
-		if #text <= 64 then
-			local ok, clip = pcall(function() return getclipboard and getclipboard() end)
-			if ok and type(clip) == "string" and clip ~= "" then text = clip end
-		end
-		local name = Configs.UniqueName("imported")
-		local ok, err = Configs.Import(text, name)
-		if ok then box.Text = "" end
-		Result(ok, err, "Imported as " .. name .. ".cfg", "Import failed")
-	end}, {"Reset to Defaults", {"rotate-ccw", "undo"}, function()
-		Configs.Reset()
-		Note("Settings reset to defaults")
-	end})
+	end)
 
 	Refresh()
 	W.RefreshConfigs = Refresh
