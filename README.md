@@ -1,97 +1,125 @@
 # ZeninLib
 
-UI Library for Roblox.
+A simple UI library for Roblox. You build a menu in 4 steps:
+
+1. **Load** the library
+2. Make a **window**
+3. Add **tabs** and **sections** to it
+4. Put **elements** (toggles, sliders, buttons...) into sections
+
+Full working example: [`Example.lua`](Example.lua).
+
+## 1. Load the library
 
 ```lua
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/whereesd0-star/Zenin/main/ZeninLib.lua"))()
 ```
 
-Full example: [`Example.lua`](Example.lua).
-
-## Window
+## 2. Make a window
 
 ```lua
 local Window = Library:CreateWindow({
-    Title = "My Hub",
-    Logo = "M",
-    ToggleKey = Enum.KeyCode.RightShift,
-    Theme = "Dark",
-    Accent = Color3.fromRGB(255, 89, 89),
-    Configs = true,
-    Watermark = {
-        Title = "myhub",
-        Site = "myhub.cc",
-        Detail = "roblox",
-        Modes = {"Product Type"},
-    },
+    Title = "My Hub",                        -- name in the top bar
+    Logo = "M",                              -- a letter, an icon ("zap") or an image ("rbxassetid://123")
+    ToggleKey = Enum.KeyCode.RightShift,     -- key that opens / closes the menu
+    Accent = Color3.fromRGB(255, 89, 89),    -- main color
+    Configs = {Folder = "MyHub"},            -- save settings to files (or just: Configs = true)
+    Watermark = {Title = "myhub", Site = "myhub.cc", Detail = "roblox"},
 })
 ```
+
+Only `Title` really matters — everything else has a good default.
 
 | Option | What it does |
 |---|---|
 | `Title` | name in the header |
-| `Logo` | a letter (`"M"`), an icon (`"zap"`) or an image (`"rbxassetid://123"`) |
+| `Logo` | letter, icon name or image id |
 | `ToggleKey` | key that opens the menu |
 | `Theme` | `"Dark"` or `"Light"` |
 | `Accent` | main color |
-| `Configs` | `true` or a table of config options (see below) |
+| `Configs` | `true` or `{Folder = "MyHub"}` — turns on the configs page |
 | `ScrollbarSize` | scrollbar thickness, 3–24 |
 | `Watermark` | watermark settings, `false` to hide it |
 
-Clicking the watermark opens and closes the menu.
+Tip: clicking the watermark also opens / closes the menu.
+The gear in the header always has settings for theme, color, size, scrollbar and watermark.
 
-Settings (the gear in the header) are always there: theme, color, menu size, scrollbar, watermark.
+## 3. Tabs and sections
 
-## Tabs and sections
+Think of it like a book: **tab** = chapter (bottom bar), **sub-tab** = page, **section** = box on the page.
 
 ```lua
-local Combat = Window:AddTab({Name = "Combat", Icon = "crosshair"})
-local Aimbot = Combat:AddSubTab({Name = "Aimbot", Icon = "crosshair"})
-local Section = Aimbot:AddSection({Name = "Target", Side = "Left"})
+local Combat  = Window:AddTab({Name = "Combat", Icon = "crosshair"})
+local Aimbot  = Combat:AddSubTab({Name = "Aimbot", Icon = "crosshair"})   -- optional
+local Section = Aimbot:AddSection({Name = "Target", Side = "Left"})       -- Side = "Left" or "Right"
 ```
 
-If a tab has no sub-tabs, add sections straight to it: `Tab:AddSection(...)`.
+No sub-tabs? Add sections straight to the tab: `Combat:AddSection({...})`.
 
-Your own section in settings: `Window.Settings:AddSection({Name = "Info"})`.
+Your own box in the settings page: `Window.Settings:AddSection({Name = "Info"})`.
 
-## Elements
+## 4. Elements
 
-Every element has `Name`, `Flag`, `Default`, `Callback`.
-Get a value by flag: `Library.Flags["MyFlag"]`.
+Every element can have:
+
+- `Name` — the text you see
+- `Default` — the starting value
+- `Flag` — a unique id, so the value is saved in configs and you can read it with `Library.Flags["MyFlag"]`
+- `Callback` — a function that runs every time the value changes
 
 ```lua
-Section:AddToggle({Name = "Aimbot", Default = false, Flag = "Aimbot", Callback = function(v) end})
+-- on / off switch
+Section:AddToggle({Name = "Aimbot", Default = false, Flag = "Aimbot", Callback = function(on)
+    print("Aimbot is", on)
+end})
 
+-- number from Min to Max
 Section:AddSlider({Name = "FOV", Min = 0, Max = 100, Default = 50, Step = 1, Suffix = "%", Flag = "FOV"})
 
+-- pick one
 Section:AddDropdown({Name = "Bone", Options = {"Head", "Body"}, Default = "Head", Flag = "Bone"})
 
+-- pick many
 Section:AddMultiDropdown({Name = "Hitboxes", Options = {"Head", "Chest", "Legs"}, Default = {"Head"}, Flag = "Hitboxes"})
 
+-- color (or a gradient: give up to 4 colors)
 Section:AddColorPicker({Name = "Color", Default = Color3.new(1, 1, 1), Flag = "Color"})
 Section:AddColorPicker({Name = "Gradient", Default = {Color3.new(1, 0, 0), Color3.new(0, 0, 1)}, Flag = "Gradient"})
 
+-- simple button
 Section:AddButton({Name = "Reset", Callback = function() end})
 
+-- button with an icon (great for links)
 Section:AddCardButton({Name = "Telegram", Icon = "send", ButtonText = "Open", Callback = function()
     setclipboard("https://t.me/...")
-    return "Copied"
+    return "Copied"   -- text you return shows on the button for a moment
 end})
 ```
 
-- ColorPicker takes up to 4 colors.
-- If a button's `Callback` returns text, it shows on the button for a moment.
-- `DependsOn = toggle`: the element only works while the toggle is on.
+**Show an element only when a toggle is on:** add `DependsOn = myToggle`.
 
-Element methods: `Set(value)`, `Get()`, `SetEnabled(bool)`, `SetVisible(bool)`, `OnChanged(fn)`, `Destroy()`.
-Dropdowns also have `SetOptions(list)`.
+```lua
+local esp = Section:AddToggle({Name = "ESP", Flag = "ESP"})
+Section:AddSlider({Name = "ESP Distance", Min = 0, Max = 1000, Flag = "EspDistance", DependsOn = esp})
+```
 
-### Element gear
+**Things you can do with any element:**
+
+| Method | What it does |
+|---|---|
+| `Set(value)` / `Get()` | change / read the value |
+| `SetEnabled(bool)` | lock / unlock it |
+| `SetVisible(bool)` | show / hide it |
+| `OnChanged(fn)` | run a function when the value changes |
+| `Destroy()` | remove it |
+| `SetOptions(list)` | dropdowns only: new list of options |
+
+### Little gear next to an element
 
 ```lua
 local font = Section:AddDropdown({Name = "Font", Options = {"Small", "Big"}})
-local settings = font:AddSettings({Title = "Font Settings"})
-settings:AddSlider({Name = "Size", Min = 6, Max = 20, Default = 10})
+local more = font:AddSettings({Title = "Font Settings"})
+more:AddSlider({Name = "Size", Min = 6, Max = 20, Default = 10})
 ```
 
 Works on Toggle, Slider, Dropdown, MultiDropdown and ColorPicker.
@@ -104,43 +132,40 @@ Works on Toggle, Slider, Dropdown, MultiDropdown and ColorPicker.
 | `SetTheme(name)`, `SetAccent(color)` | theme and color |
 | `SetScale(n)`, `Center()` | size and position |
 | `SetLogo(value)`, `SetTitle(text)` | logo and name |
-| `Notify({Title, Content, Duration})` | notification |
-| `Destroy()` | unload the menu |
+| `Notify({Title, Content, Duration})` | pop-up message |
+| `Destroy()` | close and remove the menu |
 
-## Configs
+## Configs (saving settings)
 
-```lua
-local Window = Library:CreateWindow({
-    Title = "My Hub",
-    Configs = {
-        Folder = "MyHub",        -- own folder for this hub, nested works too: "Zenin/MyHub"
-        Key = "my secret key",   -- turns on encryption
-        BindToUser = false,      -- true = only this Roblox account can open the configs
-    },
-})
-```
+Turn them on with `Configs = true` or `Configs = {Folder = "MyHub"}`.
+Files are plain JSON (`MyHub/<name>.cfg`), so you can open and edit them in any text editor.
 
-Everything with a `Flag` is saved, plus theme, accent, menu size and watermark.
-With a `Key`, files are encrypted (ChaCha20 + HMAC-SHA256). Without the key they can't be read or edited.
-Old plain configs still load.
+The configs page (the file button next to the gear) has:
 
-The configs page (button next to settings) can create, load, save, delete, copy and import configs.
-The star marks a config to load automatically on the next run.
+- **Name** box + **Create New** — saves your current settings as a new config
+- **Refresh List** — re-reads the folder
+- for every config: **Load** (arrow), **Save** (disk) and **Delete** (trash)
+
+Everything with a `Flag` is saved, plus theme, color, menu size and watermark.
+
+From code:
 
 | Method | What it does |
 |---|---|
-| `Window.Configs:Save(name)` / `Load(name)` / `Delete(name)` | basic actions |
-| `Rename(old, new)`, `Duplicate(name)`, `Exists(name)`, `List()` | manage files |
-| `Export(name?)` / `Import(text, name?)` | share configs as text |
-| `SetAutoLoad(name)`, `GetAutoLoad()` | autoload |
-| `Reset()` | all elements back to their default values |
-| `SetFolder(path)`, `SetEncryption(on, key)` | change folder or encryption |
+| `Window.Configs:Save(name)` | save |
+| `Window.Configs:Load(name)` | load |
+| `Window.Configs:Delete(name)` | delete |
+| `Window.Configs:List()` | list of config names |
+| `Window.Configs:Reset()` | put every element back to its default |
+| `Window.Configs:SetAutoLoad(name)` | load this config automatically next time (`nil` to turn off) |
+| `Window.Configs:GetActive()` | name of the loaded config |
+| `Rename(old, new)`, `Duplicate(name)`, `Exists(name)` | manage files |
 | `Ignore(flag, ...)` | don't save these flags |
-| `Register(key, get, set)` | save your own data in configs |
+| `Register(key, get, set)` | save your own data too |
 | `OnSave(fn)`, `OnLoad(fn)` | run code on save / load |
-| `GetActive()` | name of the loaded config |
 
 ```lua
+-- save your own table inside configs
 Window.Configs:Register("Waypoints", function() return myWaypoints end, function(v) myWaypoints = v end)
 ```
 
@@ -150,13 +175,11 @@ Window.Configs:Register("Waypoints", function() return myWaypoints end, function
 Window.Watermark:SetTitle("myhub")
 Window.Watermark:SetSite("myhub.cc")
 Window.Watermark:SetDetail("roblox")
-Window.Watermark:SetModes({"Time", "FPS", "Ping"})
+Window.Watermark:SetModes({"Time", "FPS", "Ping"})   -- also "Product Type"
 Window.Watermark:SetVisible(false)
 ```
 
-Modes: `Time`, `FPS`, `Ping`, `Product Type`. You can turn on several at once.
-
-## Custom theme
+## Your own theme
 
 ```lua
 Library:AddTheme("Ocean", {WindowBg = Color3.fromRGB(10, 16, 22)})
